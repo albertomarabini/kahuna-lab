@@ -14,6 +14,19 @@ from google.cloud import secretmanager
 from google.oauth2 import service_account
 from google.auth import default as google_auth_default
 import yaml
+import logging
+
+logger = logging.getLogger("requirements_backend")
+if not logger.handlers:
+    # Basic console logger; if embedded somewhere else, this won't double-add handlers
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter(
+        "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+    )
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+logger.setLevel("INFO")
 
 from classes.schema_manager import SchemaManager
 from classes.backend_prompts import CHAT_PROMPT, SCHEMA_UPDATE_PROMPT
@@ -83,11 +96,11 @@ def get_db_engine():
 
     if DB_HOST == "localhost":
         url = "sqlite:///requirements.db"
-        print(f"[DB] Using SQLite URL: {url}")
+        logger.info(f"[DB] Using SQLite URL: {url}")
         return create_engine(url)
 
     url = f"postgresql+pg8000://{DB_USER}:{password}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-    print(f"[DB] Connecting to Postgres URL: {url}")
+    logger.info(f"[DB] Connecting to Postgres URL: {url}")
 
     # pg8000 supports 'timeout' in seconds
     return create_engine(
@@ -115,7 +128,7 @@ class Backend:
                 model="gemini-2.5-flash-lite",
             )
         except Exception as e:
-            print(f"Warning: Could not initialize VertexAI: {e}. Using mock.")
+            logger.info(f"Warning: Could not initialize VertexAI: {e}. Using mock.")
             self.llm = None
             self.chat_llm = None
         self.schema_manager = SchemaManager(self.llm)
@@ -146,7 +159,7 @@ class Backend:
         pattern = re.compile(r'\{(\w+)\}')
         result = pattern.sub(replacer, dest_string)
         if missing_keys and print_unused_keys_report:
-            print(f"\033[93m\033[3mMissing keys within string-to-format in unsafe_string_format: {', '.join(missing_keys)}\033[0m", flush=True)
+            logger.info(f"\033[93m\033[3mMissing keys within string-to-format in unsafe_string_format: {', '.join(missing_keys)}\033[0m", flush=True)
             # print(f"\033[93m\033[3mOriginal string: {dest_string}\033[0m", flush=True)
         return result
 
@@ -154,6 +167,12 @@ class Backend:
         try:
             with open(os.path.join(EVENTS_REQUEST_DIR, request_file), "r") as f:
                 request_data = json.load(f)
+
+            try:
+                preview = json.dumps(request_data, indent=2)
+            except Exception:
+                preview = str(request_data)
+            logger.debug("process_request request payload=\n%s", preview)
 
             request_type = request_data.get("type")
             username = request_data.get("username")
@@ -203,12 +222,19 @@ class Backend:
             with open(os.path.join(EVENTS_RESPONSE_DIR, response_filename), "w") as f:
                 json.dump(response_data, f)
 
+            try:
+                preview = json.dumps(response_data, indent=2)
+            except Exception:
+                preview = str(response_data)
+            logger.debug("process_request response payload=\n%s", preview)
+
+
             # Clean up request
             os.remove(os.path.join(EVENTS_REQUEST_DIR, request_file))
 
         except Exception as e:
-            print(f"Error processing request {request_file}: {e}")
-            traceback.print_exc()
+            logger.info(f"Error processing request {request_file}: {e}")
+            traceback.logger.info_exc()
 
     def load_project(self, username, project_name):
         session = self.Session()
@@ -261,7 +287,7 @@ class Backend:
         return self.histories[key]
 
     def _safe_error_response(self, current_schema, error: Exception):
-        print(f"[handle_chat] Error: {error}")
+        logger.info(f"[handle_chat] Error: {error}")
         traceback.print_exc()
 
         return {
@@ -287,10 +313,7 @@ class Backend:
             start = f"\033[{color_code}m"
             end = "\033[0m"
             text = f"{start}{text}{end}"
-        if end_value == None:
-            print(text, flush=True)
-        else:
-            print(text, end=end_value, flush=True)
+        logger.info(str(text))
         return False
 
     def clean_triple_backticks(self, code) -> str:
@@ -487,7 +510,7 @@ You must fix the problems above and propose a corrected set of commands.
                 model=model_name,
             )
         except Exception as e:
-            print(f"Warning: Could not initialize VertexAI model '{model_name}': {e}. Using mock.")
+            logger.info(f"Warning: Could not initialize VertexAI model '{model_name}': {e}. Using mock.")
             raise e
 
     def handle_chat(self, username, project_name, payload):
@@ -773,6 +796,7 @@ MANDATORY:
             }
 
         job_id = (payload or {}).get("job_id")
+        logger.info(f"handle_job_status: {payload}")
         if not job_id:
             return {
                 "job_id": None,
@@ -831,7 +855,7 @@ MANDATORY:
                     pass
 
     def run(self):
-        print("Backend running...")
+        logger.info("Backend running...")
         if not os.path.exists(EVENTS_REQUEST_DIR):
             os.makedirs(EVENTS_REQUEST_DIR)
         if not os.path.exists(EVENTS_RESPONSE_DIR):
