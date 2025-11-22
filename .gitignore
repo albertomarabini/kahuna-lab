@@ -14,3 +14,4 @@ frontend/package-lock.json
 frontend/package.json
 frontend/README.md
 frontend/eslint.config.js
+frontend/.env.production
