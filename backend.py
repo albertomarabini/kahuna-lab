@@ -15,18 +15,16 @@ from google.oauth2 import service_account
 from google.auth import default as google_auth_default
 import yaml
 import logging
+import sys
 
-logger = logging.getLogger("requirements_backend")
-if not logger.handlers:
-    # Basic console logger; if embedded somewhere else, this won't double-add handlers
-    handler = logging.StreamHandler()
-    formatter = logging.Formatter(
-        "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
-    )
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
+import logging
 
-logger.setLevel("INFO")
+logging.basicConfig(
+    level=logging.DEBUG,  # or INFO if it's too noisy
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+
+logger = logging.getLogger("kahuna_backend")
 
 from classes.schema_manager import SchemaManager
 from classes.backend_prompts import CHAT_PROMPT, SCHEMA_UPDATE_PROMPT
