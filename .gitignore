@@ -1,7 +1,16 @@
 /.env
 /.vscode
-/frontend
 /original_prompts
 /requirements.db
 /start.sh
 /stop.sh
+
+frontend/public
+frontend/src
+frontend/.env.local
+frontend/vite.config.js
+frontend/index.html
+frontend/package-lock.json
+frontend/package.json
+frontend/README.md
+frontend/eslint.config.js
