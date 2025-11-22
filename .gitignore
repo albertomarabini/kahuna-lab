@@ -1,0 +1,7 @@
+/.env
+/.vscode
+/frontend
+/original_prompts
+/requirements.db
+/start.sh
+/stop.sh
