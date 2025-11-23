@@ -1,6 +1,18 @@
 {
     "Project": {
         "description": "Root node for the Software Requirements Specification.",
+        "UserStories": {
+            "Story": {
+                "description": "A specific user story capturing a functional requirement.",
+                "body": "The user story text (As a <role>, I want <feature>, so that <benefit>)."
+            }
+        },
+        "NonFunctionalRequirements": {
+            "Requirement": {
+                "description": "A specific non-functional requirement or constraint.",
+                "body": "Details of the requirement (e.g., performance target, safety constraint, reliability, security, compliance)."
+            }
+        },
         "CoreDataStructures": {
             "DataModel": {
                 "description": "A specific domain data structure or model used by the system.",
@@ -17,18 +29,6 @@
             "Interface": {
                 "description": "A specific external or hardware interface the system interacts with.",
                 "body": "Protocol details, commands, timing, transport characteristics, and data exchanged."
-            }
-        },
-        "UserStories": {
-            "Story": {
-                "description": "A specific user story capturing a functional requirement.",
-                "body": "The user story text (As a <role>, I want <feature>, so that <benefit>)."
-            }
-        },
-        "NonFunctionalRequirements": {
-            "Requirement": {
-                "description": "A specific non-functional requirement or constraint.",
-                "body": "Details of the requirement (e.g., performance target, safety constraint, reliability, security, compliance)."
             }
         },
         "UIComponents": {

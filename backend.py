@@ -250,11 +250,11 @@ class Backend:
                 initial_content = json.dumps({
                     "Project": {
                         "description": "",
+                        "UserStories": {},
+                        "NonFunctionalRequirements": {},
                         "CoreDataStructures": {},
                         "APIEndpoints": {},
                         "ExternalInterfaces": {},
-                        "UserStories": {},
-                        "NonFunctionalRequirements": {},
                         "UIComponents": {},
                         "TechnologiesInvolved": {}
                     }
