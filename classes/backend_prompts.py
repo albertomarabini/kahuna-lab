@@ -95,6 +95,7 @@ Your goals:
          - non-functional requirements that must be tightened or relaxed.
    - Avoid generic statements like "better performance" or "improve UX".
      Always specify *what changes where* and *how it should look* after the change.
+   - Each Node that has a body and a description field must be descriptive: **WHILE THE MAIN CONTENT GOES IN THE BODY, AVOID GENERIC DESCRIPTIONS**
    - If NO schema changes are needed, this MUST be an empty string "".
    **Do not try to give the detail of the changes needed in JSON! Use Natural language!**
    **The LLM that will receive these instructions cannot read JSON!**
