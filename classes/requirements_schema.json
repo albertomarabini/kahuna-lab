@@ -16,7 +16,7 @@
         "ExternalInterfaces": {
             "Interface": {
                 "description": "A specific external or hardware interface the system interacts with.",
-                "body": "Protocol details, commands, timing, electrical/transport characteristics, and data exchanged."
+                "body": "Protocol details, commands, timing, transport characteristics, and data exchanged."
             }
         },
         "UserStories": {

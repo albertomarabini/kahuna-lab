@@ -594,6 +594,7 @@ IMPORTANT FOR THIS STEP:
                 "updated_project_description": updated_project_description
             }
         except Exception as e:
+            logger.warning(f"Error while executing a prompt {e}")
             return self._safe_error_response(current_schema, e)
 
     def handle_comment(self, username, project_name, payload):
