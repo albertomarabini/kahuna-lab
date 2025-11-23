@@ -196,7 +196,7 @@ class Backend:
                 response_data["data"] = self.handle_comment(username, project_name, payload)
             elif request_type == "delete_node":
                 response_data["data"] = self.handle_delete_node(username, project_name, payload)
-            elif request_type == "update_node":
+            elif request_type == "update_node" or request_type == "add_node":
                 response_data["data"] = self.handle_direct_schema_command(username, project_name, payload)
             elif request_type == "is_worker_busy":
                 response_data["data"] = self.is_worker_busy()
