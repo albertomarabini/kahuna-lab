@@ -163,52 +163,40 @@ Your task:
 - Return ONLY a single JSON object describing atomic insert/update/delete operations.
 - This JSON will be parsed directly by a program. Do NOT add explanations, comments, markdown fences, or extra keys.
 
-Output format (IMPORTANT, follow exactly):
-
-{
-  "insert": [
-    {
-      "path": "$.Project.Some.GroupingNode",
-      "content": { ... }
-    }
-  ],
-  "update": [
-    {
-      "path": "$.Project.Some.GroupingNode.Or.Entity",
-      "content": { ... }
-    }
-  ],
-  "delete": [
-    "$.Project.Some.GroupingNode.Or.Entity.ToRemove"
-  ]
-}
-
-If you don't need one of insert/update/delete, return it as an empty array, e.g. "delete": [].
-
 --------------------------------------------------
-SCHEMA MENTAL MODEL
+Output format (IMPORTANT, follow exactly):
 --------------------------------------------------
 
 The root "$" is a grouping node. Inside it there is a module called "Project".
 
 - `$.Project` is an ENTITY. It must always have a `description`.
-- Direct children of `Project` are GROUPING NODES. They never contain plain strings, only child entities:
-  - `$.Project.CoreDataStructures`
-  - `$.Project.APIEndpoints`
-  - `$.Project.ExternalInterfaces`
-  - `$.Project.UserStories`
-  - `$.Project.NonFunctionalRequirements`
-  - `$.Project.UIComponents`
-  - `$.Project.TechnologiesInvolved`
+- Direct children of `Project` are GROUPING NODES.
+- A **GROUPING node**:
+  - Has NO text attributes.
+  - Its values are all objects (entities), keyed by name.
+  - **Cannot be deleted!**
+  - **Cannot to be created!** (you got what you got)
+  - Example grouping nodes:
+    - `$.Project.CoreDataStructures`
+    - `$.Project.APIEndpoints`
+    - `$.Project.ExternalInterfaces`
+    - `$.Project.UserStories`
+    - `$.Project.NonFunctionalRequirements`
+    - `$.Project.UIComponents`
+    - `$.Project.TechnologiesInvolved`
 
-Each grouping node contains **named entities keyed by their logical name**, NOT arrays.
+Each grouping node contains **named entity Nodes keyed by their logical name**, NOT arrays.
+- An **ENTITY node**:
+  - Has 2 TEXT attributes `description`, `body`.
+  - Does not contain nested grouping nodes or nested entities.
+  - For this requirements schema, every entity you create or update MUST include a `description` and a `body`
 
-Examples of valid shapes inside the grouping nodes:
+Examples of valid shapes inside the grouping nodes (eg: CoreDataStructures, APIEndpoints, ExternalInterfaces, UserStories, NonFunctionalRequirements, UIComponents, TechnologiesInvolved):
 
 - Core data structures:
   $.Project.CoreDataStructures = {
-    "Product": { "description": "...", "declaration": "..." },
-    "User":    { "description": "...", "declaration": "..." }
+    "Product": { "description": "...", "body": "..." },
+    "User":    { "description": "...", "body": "..." }
   }
 
 - API endpoints:
@@ -217,53 +205,10 @@ Examples of valid shapes inside the grouping nodes:
     "CreateOrder":  { "description": "...", "body": "..." }
   }
 
-- External interfaces (hardware, protocols, third party services):
-  $.Project.ExternalInterfaces = {
-    "RoboticArmCANBus": { "description": "...", "body": "..." }
-  }
+etc.
 
-- User stories:
-  $.Project.UserStories = {
-    "ViewProducts": { "description": "...", "body": "As a <role>, I want ..." }
-  }
 
-- Non functional requirements:
-  $.Project.NonFunctionalRequirements = {
-    "Performance": { "description": "...", "body": "..." }
-  }
-
-- UI components:
-  $.Project.UIComponents = {
-    "ProductCard": { "description": "...", "body": "..." }
-  }
-
-- Technologies involved:
-  $.Project.TechnologiesInvolved = {
-    "PostgreSQL": { "description": "...", "body": "..." },
-    "Redis":      { "description": "...", "body": "..." }
-  }
-
-The exact required attributes for each entity type (whether it uses `body` or `declaration`) are defined in the Validation Rules you receive as {validation_schema_json}. Always respect that template.
-
---------------------------------------------------
-RULES FOR ENTITIES VS GROUPING NODES
---------------------------------------------------
-
-Use the Validation Rules to distinguish:
-
-- An **ENTITY node**:
-  - Has one or more TEXT attributes such as `description`, `body`, `declaration`.
-  - May also contain nested grouping nodes or nested entities, depending on the template.
-  - For this requirements schema, every entity you create or update MUST include:
-    - `description`
-    - and the required text field (`body` or `declaration`) as specified in the template.
-
-- A **GROUPING node**:
-  - Has NO text attributes.
-  - Its values are all objects (entities), keyed by name.
-  - Example grouping nodes: `CoreDataStructures`, `APIEndpoints`, `ExternalInterfaces`, `UserStories`, `NonFunctionalRequirements`, `UIComponents`, `TechnologiesInvolved`.
-
-DO NOT put raw strings directly under grouping nodes. If you do that, validation will fail.
+**DO NOT put raw strings directly under grouping nodes. If you do that, validation will fail.**
 
 --------------------------------------------------
 RULES FOR PATHS
@@ -273,102 +218,176 @@ All paths must start with `$.Project`.
 
 Typical patterns:
 
-- Insert or update multiple entities under a grouping node:
-  - path: a grouping node
-    - e.g. `$.Project.CoreDataStructures`
-    - e.g. `$.Project.APIEndpoints`
+  - INSERT always uses a full entity path (e.g. "$.Project.APIEndpoints.GetProducts").
+    - You NEVER insert at a grouping node (e.g. "$.Project.APIEndpoints").
+    - The parent grouping node must already exist.
+
+  - UPDATE can target either:
+    - a single entity node (e.g. "$.Project.APIEndpoints.GetProducts"), or
+    - an entire grouping node to update multiple entities at once
+      (e.g. "$.Project.APIEndpoints").
+
+Examples of INSERT (entity-level), DELETE and UPDATE (entity-level or grouping-level):
+
   - content: an object whose keys are entity names, and whose values are full entities.
     Example:
     {
       "insert": [
         {
+          "path": "$.Project.APIEndpoints.InsertProduct",
+          "content": {
+              "description": "Insert new Product",
+              "body": "..."
+          }
+        },
+        {
+          "path": "$.Project.APIEndpoints.DeleteProduct",
+          "content": {
+              "description": "Delete Product.",
+              "body": "..."
+          }
+        },
+      ],
+      "update": [
+        {
           "path": "$.Project.CoreDataStructures",
           "content": {
             "Product": {
               "description": "Domain model for a product in the catalog.",
-              "declaration": "..."
+              "body": "..."
             },
             "User": {
               "description": "Domain model for a platform user.",
-              "declaration": "..."
+              "body": "..."
             }
+          }
+        },
+        {
+          "path": "$.Project.ExternalInterfaces.oldInterface",
+          "content": {
+            "description": "Domain model for a product in the catalog.",
+            "body":"..."
+          }
+        },
+        {
+          "path": "$.Project.ExternalInterfaces.oldInterface",
+          "content": {
+            "description": "Domain model for a product in the catalog."
           }
         }
       ],
-      "update": [],
-      "delete": []
+      "delete": [
+        "$.Project.ExternalInterfaces.doSomething",
+        "$.Project.ExternalInterfaces.doSomethingElse"
+      ]
     }
 
-- Insert or update a single entity:
-  - path: the full path to the entity
+- Insert a single entity node (always entity-level):
+  - path: the full path to the entity Node (you cannot insert Grouping Nodes)
     - e.g. `$.Project.APIEndpoints.GetProducts`
     - e.g. `$.Project.UserStories.ViewProducts`
-  - content: the full entity (description + body/declaration + any allowed sub-entities).
+  - The parent Grouping Node must already exist.
+  - content: the full entity (description + body).
+        {
+          "path": "$.Project.APIEndpoints.InsertProduct",
+          "content": {
+              "description": "Insert new Product",
+              "body": "..."
+          }
+        },
+  - The entity must not exist!
+  - Grouping Nodes cannot to be Deleted or Created: You can ONLY insert entity nodes, never grouping nodes.
+  - The paths must be always of full eentity nodes to be created
+  - Entity nodes cannot to have children nodes, only text values!
+    - ✅ `$.Project.APIEndpoints.GetProducts`
+    - ❌ `$.Project.APIEndpoints.Endpoint.GetProducts`
+
+    - ✅ `$.Project.CoreDataStructures.Product`
+    - ❌ `$.Project.CoreDataStructures.DataModel.Product`
+
+- Updates:
+  - You can update an entity Node / multiple entity Nodes / a field in a entity Node
+    - a single field in an entity node
+        {
+          "path": "$.Project.ExternalInterfaces.oldInterface",
+          "content": {
+            "description": "Domain model for a product in the catalog."
+          }
+        },
+    - an entire entity node
+        {
+          "path": "$.Project.ExternalInterfaces.anotherInterface",
+          "content": {
+            "description": "Domain model for a product in the catalog.",
+            "body": "..."
+          }
+        },
+    - Multiple Entity Nodes at once (by using the parent container Node as a path)
+        {
+          "path": "$.Project.CoreDataStructures",
+          "content": {
+            "Product": {
+              "description": "Domain model for a product in the catalog.",
+              "body": "..."
+            },
+            "User": {
+              "description": "Domain model for a platform user.",
+              "body": "..."
+            }
+          }
+        },
 
 - Delete:
-  - The delete array must contain only the path to entities or grouping nodes that already exist.
-  - Examples:
-    - `"$.Project.APIEndpoints.DeleteProduct"`
-    - `"$.Project.UIComponents.ProductCard"`
-  - NEVER delete only an attribute (e.g. `"$.Project.APIEndpoints.GetProducts.description"` is invalid).
+  - The delete array must contain only the path to entities that already exist.
+  - Example:
+      "delete": [
+        "$.Project.ExternalInterfaces.doSomething",
+        "$.Project.ExternalInterfaces.doSomethingElse"
+      ]
+  - NEVER delete only an attribute or a grouping Node (e.g. `"$.Project.APIEndpoints.GetProducts.description"` `"$.Project.APIEndpoints"` are invalid). You can delete only Entity nodes!
 
-NEVER use paths that go through the template placeholder names like `Endpoint`, `Story`, `Requirement`, `Component`, `DataModel`, `Interface`, or `Tech`.
-Those names exist only in the validation template to define the shape.
-In the actual project requirements you should use domain names:
-
-- ✅ `$.Project.APIEndpoints.GetProducts`
-- ❌ `$.Project.APIEndpoints.Endpoint.GetProducts`
-
-- ✅ `$.Project.CoreDataStructures.Product`
-- ❌ `$.Project.CoreDataStructures.DataModel.Product`
 
 --------------------------------------------------
-RULES FOR INSERT / UPDATE / DELETE
+VALIDATION CHECKLIST (what you must enforce yourself)
 --------------------------------------------------
-
-General:
-
-- `"insert"`, `"update"`, and `"delete"` MUST all be present in the top-level object.
-- Each must be an array (possibly empty).
 
 INSERT:
 
-- Use when introducing new entities that do not yet exist.
-- The parent path in `"path"` must already exist OR be creatable as a grouping node according to the Validation Rules.
-- The `"content"` object must contain the FULL definition of each entity you are inserting at that path.
-- For inserts under a grouping node, `"content"` is an object mapping from entity name to entity object.
+- Use when introducing new entity node that do not yet exist.
+- The parent path in `"path"` must already exist.
+- The `"content"` object must contain the FULL definition of each entity node you are inserting at that path { "description": "...", "body": "..." }.
 
 UPDATE:
 
-- Use when changing entities that already exist (including their descriptions).
+- Use when changing entities that already exist.
 - You may target either:
   - a grouping node (to replace or add multiple child entities at once), or
   - a single entity node.
-- When you update an entity, provide the full, final version of that entity:
-  - Include `description` and the required text field (`body` or `declaration`).
-  - If you keep some existing attributes unchanged, you must still output them; do not rely on implicit merging.
+- You can update a single field in an Entity Node
 - Do NOT update grouping nodes with text attributes; grouping nodes must stay "object of entities" only.
 
 DELETE:
-
-- Use when removing an entity or a whole group of entities.
+- Use when removing an entity. You cannot delete Grouping Nodes
 - Each string in the `"delete"` array must be a valid existing path in the current schema.
-- You can only delete entities or grouping nodes, not single text attributes.
+- You can only delete entity nodes, not single text attributes or grouping nodes.
+  Example:
+        "delete": [
+          "$.Project.ExternalInterfaces.doSomething",
+          "$.Project.ExternalInterfaces.doSomethingElse"
+        ]
 
-MANDATORY PROJECT DESCRIPTION UPDATE
-
-- In EVERY response you MUST include exactly one `update` operation for `$.Project`.
+PROJECT DESCRIPTION UPDATE
 - Treat `$.Project.description` as the high-level executive summary of the whole requirements model.
-- Whenever you insert or update any requirement (data model, endpoint, story, NFR, UI component, etc.),
-  you must also refresh `$.Project.description` so that it briefly reflects:
-  - the overall domain and purpose of the system, and
+- Whenever you insert or update a requirement (data model, endpoint, story, NFR, UI component, etc.),
+  that changes:
+  - the overall domain and purpose of the system, or
   - the main groups of requirements currently present (CoreDataStructures, APIEndpoints, ExternalInterfaces, UserStories, NonFunctionalRequirements, UIComponents, TechnologiesInvolved)
-  - any significant new concepts you added in this turn (e.g. Product, Cart, CreateOrder, CheckoutForm, RoboticArmController, etc.).
+  - any significant new concepts you added in this turn (e.g. Product, Cart, CreateOrder, CheckoutForm, RoboticArmController, etc.)
+  **you should also refresh `$.Project.description` so that it briefly reflects the change**
 
 Implementation pattern (IMPORTANT):
 
-- In the `update` array, always add ONE entry like:
-
+- In the `update` array, add ONE entry like:
   {
     "path": "$.Project",
     "content": {
@@ -378,27 +397,19 @@ Implementation pattern (IMPORTANT):
 
 - Do NOT change anything else under `Project` in that `content` object. Only include the `description` field there.
 - Do NOT use a path ending in `.description`. The path must be `"$.Project"` and `content` must be an object with a `description` field.
-- Even if the user request is very small (e.g. tweak a single endpoint), you still MUST refresh `$.Project.description` and emit this `update` entry.
-
---------------------------------------------------
-VALIDATION CHECKLIST (what you must enforce yourself)
---------------------------------------------------
+- Make sure the description stays up to date, even if the user request is very small
 
 When you propose an operation, mentally check it against the Validation Rules:
 
 1. Is the path consistent with the schema?
    - Starts with `$.Project`.
-   - Does not point to an attribute like `.description` or `.body`.
-   - Does not use template placeholder names (`Endpoint`, `Story`, `Requirement`, `Component`, `DataModel`, `Interface`, `Tech`) in the path.
+   - If is an Insert or a Delete does not point to an attribute like `.description` or `.body`.
 
 2. Is the node type correct?
    - Grouping node paths (`CoreDataStructures`, `APIEndpoints`, `ExternalInterfaces`, `UserStories`, `NonFunctionalRequirements`, `UIComponents`, `TechnologiesInvolved`) must contain only objects keyed by name, not strings.
-   - Entity nodes must contain at least `description` and the required text field.
+   - When you insert an Entity node, it must contain `description` and `body`.
 
-3. Are all required text attributes present?
-   - Every entity must obey the exact shape given in the Validation Rules for that section.
-
-4. Is the JSON valid?
+3. Is the JSON valid?
    - Double quotes for all keys and string values.
    - No trailing commas.
    - No backticks.
@@ -409,11 +420,12 @@ Example final shape:
 {
   "insert": [
     {
-      "path": "$.Project.CoreDataStructures",
+      "path": "$.Project.APIEndpoints.InsertProduct",
       "content": {
-        "Product": { "description": "...", "declaration": "..." }
+          "description": "Insert new Product",
+          "body": "..."
       }
-    }
+    },
   ],
   "update": [
     {
@@ -421,9 +433,32 @@ Example final shape:
       "content": {
         "description": "E-commerce platform for browsing products, managing carts and orders. Core data models: Product, User, Order, Cart. API endpoints for catalog browsing, cart operations and order creation. UI includes ProductCard, ProductDetailsPage, ShoppingCartPage, CheckoutForm. NFRs cover performance, security and scalability."
       }
+    },
+    {
+      "path": "$.Project.CoreDataStructures",
+      "content": {
+        "Product": {
+          "description": "Domain model for a product in the catalog.",
+          "body": "..."
+        },
+        "User": {
+          "description": "Domain model for a platform user.",
+          "body": "..."
+        }
+      }
+    },
+    {
+      "path": "$.Project.ExternalInterfaces.oldInterface",
+      "content": {
+        "description": "Domain model for a product in the catalog."
+      }
     }
   ],
-  "delete": []
+  "delete": [
+    "$.Project.ExternalInterfaces.doSomething",
+    "$.Project.ExternalInterfaces.doSomethingElse"
+  ]
+
 }
 
 Return ONLY the JSON object with "insert", "update", and "delete".

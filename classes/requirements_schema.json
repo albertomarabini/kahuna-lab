@@ -4,7 +4,7 @@
         "CoreDataStructures": {
             "DataModel": {
                 "description": "A specific domain data structure or model used by the system.",
-                "declaration": "The formal definition of the data model (e.g., JSON schema, TypeScript interface, protobuf message, SQL table)."
+                "body": "The formal definition of the data model (e.g., JSON schema, TypeScript interface, protobuf message, SQL table)."
             }
         },
         "APIEndpoints": {

@@ -196,6 +196,8 @@ class Backend:
                 response_data["data"] = self.handle_comment(username, project_name, payload)
             elif request_type == "delete_node":
                 response_data["data"] = self.handle_delete_node(username, project_name, payload)
+            elif request_type == "update_node":
+                response_data["data"] = self.handle_direct_schema_command(username, project_name, payload)
             elif request_type == "is_worker_busy":
                 response_data["data"] = self.is_worker_busy()
             elif request_type == "submit_job":
@@ -625,7 +627,7 @@ Your job:
   - keep the schema valid against the Validation Rules,
   - preserve all existing data structures, file structures, data schemas,
     and code snippets VERBATIM unless the comment clearly asks to change them,
-  - update this item's description/body/declaration/etc. so that it reflects
+  - update this item's description/body. so that it reflects
     the intent of the comment in a detailed, implementation-oriented way.
 - Do NOT invent unrelated entities or groups.
 
@@ -653,6 +655,26 @@ MANDATORY:
             # Reuse the same safe error response shape as handle_chat
             return self._safe_error_response(current_schema, e)
 
+    def handle_direct_schema_command(self, username, project_name, payload):
+        # Load current schema (dict)
+        current_schema = self.load_project(username, project_name)
+        current_schema_json = json.dumps(current_schema)
+
+        updated_schema_str, discrepancies, _ = self.schema_manager.apply_commands_to_schema(
+            current_schema_json,
+            json.dumps(payload),
+            self.requirements_schema
+        )
+        updated_schema = json.loads(updated_schema_str)
+        if not discrepancies:
+            self.save_project(username, project_name, updated_schema)
+
+        return {
+            "updated_schema": updated_schema,
+            "discrepancies": discrepancies,
+        }
+
+
     def handle_delete_node(self, username, project_name, payload):
         path = (payload or {}).get("path", "") or ""
         if not path:
@@ -678,22 +700,15 @@ MANDATORY:
                 {"path": normalized_path}
             ]
         })
-
         try:
             updated_schema_str, discrepancies, _ = self.schema_manager.apply_commands_to_schema(
                 current_schema_json,
                 delete_command,
                 self.requirements_schema
             )
-
-            # If validation failed and apply_commands_to_schema rolled back,
-            # updated_schema_str will be the original schema string.
             updated_schema = json.loads(updated_schema_str)
-
-            # Only persist if there are no discrepancies (same behavior as chat-path)
             if not discrepancies:
                 self.save_project(username, project_name, updated_schema)
-
             return {
                 "bot_message": f"Node at path '{normalized_path}' has been deleted." if not discrepancies
                                else f"Could not safely delete node at '{normalized_path}'.",
