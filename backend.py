@@ -20,8 +20,8 @@ import sys
 import logging
 
 logging.basicConfig(
-    level=logging.DEBUG,  # or INFO if it's too noisy
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    level=logging.DEBUG,
+    format="%(asctime)s | %(levelname)s | %(name)s\n%(message)s\n"
 )
 
 logger = logging.getLogger("kahuna_backend")
@@ -542,16 +542,11 @@ You must fix the problems above and propose a corrected set of commands.
             raw = getattr(raw, "content", str(raw))
             try:
                 chat_obj = self.load_fault_tolerant_json(raw)
-            except json.JSONDecodeError:
-                chat_obj = {
-                    "assistant_message": raw,
-                    "schema_change_description": "",
-                    "updated_project_description": ""
-                }
-
-            assistant_message = self._coerce_field_to_str((chat_obj.get("assistant_message") or "")).strip()
-            schema_change_description = self._coerce_field_to_str((chat_obj.get("schema_change_description") or "")).strip()
-            updated_project_description = self._coerce_field_to_str((chat_obj.get("updated_project_description") or "")).strip()
+                assistant_message = self._coerce_field_to_str((chat_obj.get("assistant_message") or "")).strip()
+                schema_change_description = self._coerce_field_to_str((chat_obj.get("schema_change_description") or "")).strip()
+                updated_project_description = self._coerce_field_to_str((chat_obj.get("updated_project_description") or "")).strip()
+            except Exception as e:
+                logger.error("Error While Processing Chat Message\n{e}\n{raw}")
 
             # Update LC history (no DB)
             if assistant_message:
