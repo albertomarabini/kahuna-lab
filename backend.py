@@ -540,6 +540,7 @@ You must fix the problems above and propose a corrected set of commands.
                 raw = '{"assistant_message": "Mock reply", "schema_change_description": "", "updated_project_description": ""}'
 
             raw = getattr(raw, "content", str(raw))
+            assistant_message, schema_change_description, updated_project_description = "", "", ""
             try:
                 chat_obj = self.load_fault_tolerant_json(raw)
                 assistant_message = self._coerce_field_to_str((chat_obj.get("assistant_message") or "")).strip()
