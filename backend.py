@@ -251,7 +251,9 @@ class Backend:
                     "Project": {
                         "description": "",
                         "UserStories": {},
+                        "CoreProcesses": {},
                         "NonFunctionalRequirements": {},
+                        "Components": {},
                         "CoreDataStructures": {},
                         "APIEndpoints": {},
                         "ExternalInterfaces": {},
@@ -546,6 +548,7 @@ You must fix the problems above and propose a corrected set of commands.
                 assistant_message = self._coerce_field_to_str((chat_obj.get("assistant_message") or "")).strip()
                 schema_change_description = self._coerce_field_to_str((chat_obj.get("schema_change_description") or "")).strip()
                 updated_project_description = self._coerce_field_to_str((chat_obj.get("updated_project_description") or "")).strip()
+                logger.info(f"Schema Changes Required: {schema_change_description}")
             except Exception as e:
                 logger.error("Error While Processing Chat Message\n{e}\n{raw}")
 

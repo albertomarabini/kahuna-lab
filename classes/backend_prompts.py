@@ -73,7 +73,7 @@ Your goals:
    - Preserving exact identifiers, field names, and structure is MORE IMPORTANT
      than brevity or elegance in your explanation.
 
-   - For each affected area (e.g. CoreDataStructures, APIEndpoints, UserStories,
+   - For each affected area (e.g. CoreDataStructures, CoreProcesses, Components, APIEndpoints, UserStories,
      NonFunctionalRequirements, UIComponents, TechnologiesInvolved), describe:
        - The **exact entities** to add / update / remove
          (e.g. CoreDataStructures.Product, APIEndpoints.CreateOrder, UserStories.ViewCart).
@@ -96,6 +96,14 @@ Your goals:
    - Avoid generic statements like "better performance" or "improve UX".
      Always specify *what changes where* and *how it should look* after the change.
    - Each Node that has a body and a description field must be descriptive: **WHILE THE MAIN CONTENT GOES IN THE BODY, AVOID GENERIC DESCRIPTIONS**
+   - **When a Name for a new Core Process or Component is required, it means literally that you must give it a Name or Title**.
+     While the required Name can be part of the body, when required, must be the value of the description field of the entity. So do not describe it as "Name:<Name>", describe it as "description:<Name>"
+     Examples:
+         - ✅ **CoreDataStructures.GameState**: GameState Represents the overall state of the game.
+         - ❌ **CoreDataStructures.GameState**: Represents the overall state of the game.
+         - ✅ - **CoreProcesses.InitializeGame**: InitializeGame
+         - ❌ - **CoreProcesses.InitializeGame**: Sets up the initial game state, including placing the snake and the first food item.
+
    - If NO schema changes are needed, this MUST be an empty string "".
    **Do not try to give the detail of the changes needed in JSON! Use Natural language!**
    **The LLM that will receive these instructions cannot read JSON!**
@@ -107,7 +115,7 @@ Your goals:
    - It must:
        - Briefly describe the domain and purpose of the system.
        - Mention the main requirement areas
-         (CoreDataStructures, APIEndpoints, ExternalInterfaces, UserStories,
+         (CoreDataStructures, Components, CoreProcesses, APIEndpoints, ExternalInterfaces, UserStories,
           NonFunctionalRequirements, UIComponents, TechnologiesInvolved)
          that are relevant so far.
        - Explicitly mention important new/changed concepts from THIS user message
@@ -164,6 +172,13 @@ Your task:
 - Return ONLY a single JSON object describing atomic insert/update/delete operations.
 - This JSON will be parsed directly by a program. Do NOT add explanations, comments, markdown fences, or extra keys.
 
+Important:
+**When the Validation Rules require a Name for a new Core Process or Component, means literally that you must give it a Name or Title**
+     Examples:
+         - ✅ **CoreDataStructures.GameState**: GameState Represents the overall state of the game.
+         - ❌ **CoreDataStructures.GameState**: Represents the overall state of the game.
+         - ✅ - **CoreProcesses.InitializeGame**: InitializeGame
+         - ❌ - **CoreProcesses.InitializeGame**: Sets up the initial game state, including placing the snake and the first food item.
 --------------------------------------------------
 Output format (IMPORTANT, follow exactly):
 --------------------------------------------------
@@ -179,8 +194,10 @@ The root "$" is a grouping node. Inside it there is a module called "Project".
   - **Cannot to be created!** (you got what you got)
   - Example grouping nodes:
     - `$.Project.CoreDataStructures`
+    - `$.Project.CoreProcesses`
     - `$.Project.APIEndpoints`
     - `$.Project.ExternalInterfaces`
+    - `$.Project.Components`
     - `$.Project.UserStories`
     - `$.Project.NonFunctionalRequirements`
     - `$.Project.UIComponents`
@@ -192,7 +209,7 @@ Each grouping node contains **named entity Nodes keyed by their logical name**, 
   - Does not contain nested grouping nodes or nested entities.
   - For this requirements schema, every entity you create or update MUST include a `description` and a `body`
 
-Examples of valid shapes inside the grouping nodes (eg: CoreDataStructures, APIEndpoints, ExternalInterfaces, UserStories, NonFunctionalRequirements, UIComponents, TechnologiesInvolved):
+Examples of valid shapes inside the grouping nodes (eg: CoreProcesses, CoreDataStructures, Components, APIEndpoints, ExternalInterfaces, UserStories, NonFunctionalRequirements, UIComponents, TechnologiesInvolved):
 
 - Core data structures:
   $.Project.CoreDataStructures = {
@@ -382,7 +399,7 @@ PROJECT DESCRIPTION UPDATE
 - Whenever you insert or update a requirement (data model, endpoint, story, NFR, UI component, etc.),
   that changes:
   - the overall domain and purpose of the system, or
-  - the main groups of requirements currently present (CoreDataStructures, APIEndpoints, ExternalInterfaces, UserStories, NonFunctionalRequirements, UIComponents, TechnologiesInvolved)
+  - the main groups of requirements currently present (CoreDataStructures, CoreProcesses, Components, APIEndpoints, ExternalInterfaces, UserStories, NonFunctionalRequirements, UIComponents, TechnologiesInvolved)
   - any significant new concepts you added in this turn (e.g. Product, Cart, CreateOrder, CheckoutForm, RoboticArmController, etc.)
   **you should also refresh `$.Project.description` so that it briefly reflects the change**
 
@@ -407,7 +424,7 @@ When you propose an operation, mentally check it against the Validation Rules:
    - If is an Insert or a Delete does not point to an attribute like `.description` or `.body`.
 
 2. Is the node type correct?
-   - Grouping node paths (`CoreDataStructures`, `APIEndpoints`, `ExternalInterfaces`, `UserStories`, `NonFunctionalRequirements`, `UIComponents`, `TechnologiesInvolved`) must contain only objects keyed by name, not strings.
+   - Grouping node paths (`CoreDataStructures`, `CoreProcesses`, `Components`, `APIEndpoints`, `ExternalInterfaces`, `UserStories`, `NonFunctionalRequirements`, `UIComponents`, `TechnologiesInvolved`) must contain only objects keyed by name, not strings.
    - When you insert an Entity node, it must contain `description` and `body`.
 
 3. Is the JSON valid?
