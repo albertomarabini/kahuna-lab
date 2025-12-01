@@ -9,20 +9,20 @@
         },
         "CoreProcesses": {
             "Process": {
-                "description": "The name of a specific internal/core process that must be implemented for the application to work. A process connects together User stories, Data Structures, internal and external endpoints and User Controls in one unit.",
-                "body": "The whole description of the process including Name, how should it be implemented (including processes to be completed, input, output, events it responds to, entities and components involved, technologies used)"
+                "description": "The name of a specific internal/core process or Usecase that must be implemented for the application to work. A process connects together User stories, Data Structures, internal and external endpoints and User Controls in one unit.",
+                "body": "The whole description of the process/usecase (including its Name), how should it be implemented (including processing to be performed, input, output, events it responds to, entities and components involved, technologies used)"
             }
         },
         "NonFunctionalRequirements": {
             "Requirement": {
-                "description": "A specific non-functional requirement or constraint.",
-                "body": "Details of the requirement (e.g., performance target, safety constraint, reliability, security, compliance)."
+                "description": "A specific non-functional requirement, rule, definition or constraint.",
+                "body": "Details of the requirement (e.g. a domain specific definition, validation rules, performance target, safety constraint, etc)."
             }
         },
         "Components": {
             "Component": {
-                "description": "The Name of a specific Software Component (internal class component, Database, system layer, external service/server) that must exists for Core Processes and User Stories to be implemented. The component must be referred by name.",
-                "body": "The description of the Component, its role and responsibilities, the core processes and user stories it is connected with, as well as any Data structore, internal/external API it manages/uses and the technologies used for the implementation."
+                "description": "The Name of a specific Software Component (internal class component, Database, system layer, external service/server) that must exists for Core Processes/Usecases and User Stories to be implemented. The component must be referred by name.",
+                "body": "The description of the Component, its role and responsibilities, the core processes, Use Cases and user stories it is connected with, as well as any Data structore, internal/external API it manages/uses and the technologies used for the implementation."
             }
         },
         "CoreDataStructures": {

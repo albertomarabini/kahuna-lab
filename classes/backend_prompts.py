@@ -72,7 +72,6 @@ Your goals:
        - parts that must be added/removed/edited.
    - Preserving exact identifiers, field names, and structure is MORE IMPORTANT
      than brevity or elegance in your explanation.
-
    - For each affected area (e.g. CoreDataStructures, CoreProcesses, Components, APIEndpoints, UserStories,
      NonFunctionalRequirements, UIComponents, TechnologiesInvolved), describe:
        - The **exact entities** to add / update / remove
