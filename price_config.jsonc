@@ -1,0 +1,244 @@
+{
+    // !######################################################################################################
+    // ! MAX_RECORD_THRESHOLD (how many records a model can process at a time)
+    // !######################################################################################################
+    "MAX_RECORD_THRESHOLD": {
+        // Google / Gemini
+        "gemini-3-pro": 30,              // Pro-tier
+        "gemini-2.5-pro": 30,            // Pro-tier
+        "gemini-2.5-flash": 15,          // balanced price/perf, high volume
+        "gemini-2.5-flash-lite": 9,      // massive scale / efficiency
+
+        // Anthropic / Claude
+        "claude-opus-4.5": 30,           // top-tier
+        "claude-sonnet-4.5": 15,         // mid-tier (balance)
+        "claude-haiku-4.5": 9,           // smallest / fastest
+
+        // DeepSeek (Vertex MaaS)
+        "deepseek-v3.1": 30,             // very large MoE (671B-class)
+        "deepseek-r1-0528": 30,          // reasoning-heavy model family
+
+        // Moonshot / Kimi
+        "kimi-k2-thinking": 30,          // very large reasoning MoE
+        "moonshotai/kimi-k2-thinking-maas": 30,
+
+        // Meta / Llama (Vertex MaaS)
+        "llama-4-scout": 15,             // positioned as compact vs Maverick
+        "llama-4-maverick": 30,          // more powerful sibling
+
+        // Qwen (Vertex MaaS)
+        "qwen3-next-80b-thinking": 15,   // 80B-class model family (efficient MoE)
+        "qwen3-next-80b-instruct": 15,
+        "qwen3-235b-a22b-instruct-2507": 30,  // 235B-class flagship
+
+        // MiniMax
+        "minimax-m2": 15,                // large but very “efficient to serve”
+
+        // OpenAI
+        "gpt-5.1": 30,
+        "gpt-5-mini": 15,
+        "gpt-5-nano": 9,
+        "gpt-5.1-codex-max": 30,
+        "gpt-5.1-codex": 30,
+        "gpt-5.1-codex-mini": 15
+    },
+
+    // !######################################################################################################
+    // ! MODEL_BASE_PRICE_TABLE (how much the models will cost to us)
+    // !######################################################################################################
+    "MODEL_BASE_PRICE_TABLE": {
+        // --- DeepSeek open models (Vertex MaaS) ---
+        "deepseek-v3.1": {
+            "input_short":0.60,
+            "output_short":1.70
+        },
+        "deepseek-r1-0528": {
+            "input_short":1.35,
+            "output_short":5.40
+        },
+
+        // --- Moonshot / Kimi ---
+        "kimi-k2-thinking": {
+            "input_short":0.60,
+            "output_short":2.50
+        },
+
+        // --- Llama on Vertex MaaS (Meta) ---
+        "llama-4-scout": {
+            "input_short":0.25,
+            "output_short":0.70
+        },
+        "llama-4-maverick": {
+            "input_short":0.35,
+            "output_short":1.15
+        },
+
+        // --- Qwen (MaaS) ---
+        "qwen3-next-80b-thinking": {
+            "input_short":0.15,
+            "output_short":1.20
+        },
+        "qwen3-next-80b-instruct": {
+            "input_short":0.15,
+            "output_short":1.20
+        },
+        "qwen3-235b-a22b-instruct-2507": {
+            "input_short":0.25,
+            "output_short":1.00
+        },
+        // --- MiniMax ---
+        "minimax-m2": {
+            "input_short":0.30,
+            "output_short":1.20
+        },
+        "moonshotai/kimi-k2-thinking-maas": {
+            "input_short":0.60,
+            "output_short":2.50
+        },
+
+        // --- Anthropic / Claude on Vertex (GLOBAL rates) --- :contentReference[oaicite:9]{index=9}
+
+        // Claude Opus 4.5 – global, non-batch
+        "claude-opus-4.5": {
+            "input_short":5.00,
+            "output_short":25.00,
+            // Table lists only one band for global; keep long:=short
+            "input_long":5.00,
+            "output_long":25.00,
+            "long_threshold_tokens":200000
+        },
+
+        // Claude Sonnet 4.5 – note second column >=200K input tokens: 6 / 22.5
+        "claude-sonnet-4.5": {
+            "input_short":3.00,
+            "output_short":15.00,
+            "input_long":6.00,
+            "output_long":22.50,
+            "long_threshold_tokens":200000
+        },
+
+        // Claude Haiku 4.5
+        "claude-haiku-4.5": {
+            "input_short":1.00,
+            "output_short":5.00,
+            "input_long":1.00,
+            "output_long":5.00,
+            "long_threshold_tokens":200000
+        },
+
+        // --- Google / Gemini ---
+
+        // Gemini 3 Pro Preview (global, online, non-batch)
+        // Input:  $2 (<=200K), $4 (>200K)
+        // Output: $12 (<=200K), $18 (>200K)
+        "gemini-3-pro": {
+            "input_short":2.0,
+            "output_short":12.0,
+            "input_long":4.0,
+            "output_long":18.0,
+            "long_threshold_tokens":200000
+        },
+
+        "gemini-3-flash": {
+            "input_short":0.5,
+            "output_short":3.0,
+            "input_long":0.5,
+            "output_long":3.0,
+            "long_threshold_tokens":200000
+        },
+
+        // Gemini 2.5 Pro :contentReference[oaicite:6]{index=6}
+        "gemini-2.5-pro": {
+            "input_short":1.25,
+            "output_short":10.0,
+            "input_long":2.5,
+            "output_long":15.0,
+            "long_threshold_tokens":200000
+        },
+
+        // Gemini 2.5 Flash (token-based, same short/long for input; output same too) :contentReference[oaicite:7]{index=7}
+        "gemini-2.5-flash": {
+            "input_short":0.30,
+            "output_short":2.50,
+            "input_long":0.30,
+            "output_long":2.50,
+            "long_threshold_tokens":200000
+        },
+
+        // Gemini 2.5 Flash Lite :contentReference[oaicite:8]{index=8}
+        "gemini-2.5-flash-lite": {
+            "input_short":0.10,
+            "output_short":0.40,
+            "input_long":0.10,
+            "output_long":0.40,
+            "long_threshold_tokens":200000
+        },
+
+        // --- OpenAI ---
+
+        "gpt-5.1": {
+            "default":  {"input_short": 1.25, "output_short": 10.00},
+            "priority": {"input_short": 2.50, "output_short": 20.00},
+            "flex":     {"input_short": 0.625, "output_short": 5.00}
+        },
+        "gpt-5-mini": {
+            "default":  {"input_short": 0.25, "output_short": 2.00},
+            "priority": {"input_short": 0.45, "output_short": 3.60},
+            "flex":     {"input_short": 0.125, "output_short": 1.00}
+        },
+        "gpt-5-nano": {
+            "default":  {"input_short": 0.05, "output_short": 0.40},
+            "flex":     {"input_short": 0.025, "output_short": 0.20}
+        },
+        "gpt-5.1-codex-max": {
+            "default":  {"input_short": 1.25, "output_short": 10.00},
+            "priority": {"input_short": 2.50, "output_short": 20.00}
+        },
+        "gpt-5.1-codex": {
+            "default":  {"input_short": 1.25, "output_short": 10.00},
+            "priority": {"input_short": 2.50, "output_short": 20.00}
+        },
+        "gpt-5.1-codex-mini": {
+            "default":  {"input_short": 0.25, "output_short": 2.00}
+        }
+    },
+    // !######################################################################################################
+    // ! INTERNAL CONFIGURATIONS NAMES
+    // !######################################################################################################
+    "INTERNAL_CONFIGURATIONS": {
+        "tiny":{
+            "model_configuration":["gemini-2.5-flash-lite"],
+            "expense_multiplier": {
+                "gemini-2.5-flash-lite": [1.0, 1.0]
+            }
+        },
+        "baseline_only":{
+            // !"model_configuration": rappresent model_name, architect_model_name, secondary_model_name
+            // !if 2 models are given architect_model_name == secondary_model_name
+            // !if 1 model is given model_name == architect_model_name == secondary_model_name
+            // !Model names can contain configuration if they support it
+            "model_configuration":["gpt-5.1-codex-mini_stronger"],
+            // !"expense_multiplier" rappresents prompt_tokens, completion _tokens
+            // !THESE MUST BE ACTUAL MODEL NAMES IN THE MODEL_BASE_PRICE_TABLE
+            // !Must contain 1 Record x model in the configuartion (no duplicates)
+            "expense_multiplier": {
+                "gpt-5.1-codex-mini": [2.0, 2.0]
+            }
+        },
+        "baseline_plus":{
+            "model_configuration":["gpt-5.1-codex-mini_stronger", "gpt-5.1-codex-max_stronger"],
+            "expense_multiplier": {
+                "gpt-5.1-codex-mini": [2.0, 2.0],
+                "gpt-5.1-codex-max": [2.0, 2.0]
+            }
+        }
+    },
+    // !######################################################################################################
+    // ! SINGLE MULTIPLIERS
+    // !######################################################################################################
+    "SINGLE_MULTIPLIERS":{
+        "gemini-3-flash":     [2.0, 2.0],
+        "gpt-5-mini":         [2.0, 2.0],
+        "gpt-5.1":            [2.0, 2.0]
+    }
+}

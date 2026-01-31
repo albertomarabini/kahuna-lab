@@ -1,58 +1,58 @@
 {
     "Project": {
-        "description": "Root node for the Software Requirements Specification.",
-        "UserStories": {
-            "Story": {
-                "description": "A specific user story capturing a functional requirement.",
-                "body": "The user story text (As a <role>, I want <feature>, so that <benefit>)."
+        "description": "Root node for the Software Requirements Specification. Summarize:\n- Main goals (what success looks like)\n- Non-goals (explicitly out of scope)\n- Global constraints (organizational, technical, legal) that apply to the whole system",
+        "UseCases": {
+            "UseCase": {
+                "description": "A specific use case describing how one or more actors interact with the system to achieve a goal.",
+                "body": "Write a structured Markdown description including:\n- Name and short summary\n- Primary and secondary actors (by role name)\n- Goal (what the primary actor wants to achieve)\n- Preconditions (what must be true before this use case starts)\n- Postconditions (what must be true after successful completion)\n- Main flow (numbered steps of the happy path)\n- Alternative/exception flows (key deviations with their conditions)\n- Acceptance criteria (a few concrete scenarios, Given/When/Then or similar)\n- Related components, data models, API endpoints and UI components (by name)"
             }
         },
         "CoreProcesses": {
             "Process": {
-                "description": "The name of a specific internal/core process or Usecase that must be implemented for the application to work. A process connects together User stories, Data Structures, internal and external endpoints and User Controls in one unit.",
-                "body": "The whole description of the process/usecase (including its Name), how should it be implemented (including processing to be performed, input, output, events it responds to, entities and components involved, technologies used)"
+                "description": "The name of a specific internal/core process that realizes one or more use cases or critical system workflows from the system's perspective.",
+                "body": "A structured description focusing on the internal view:\n- Name and short summary\n- Linked use cases (by name)\n- Triggering events or conditions\n- Inputs and outputs (data models by name)\n- Internal steps or activities (can be high-level)\n- Components and external interfaces involved\n- Important internal states and invariants\n- Failure modes and how they are handled"
             }
         },
         "NonFunctionalRequirements": {
             "Requirement": {
-                "description": "A specific non-functional requirement, rule, definition or constraint.",
-                "body": "Details of the requirement (e.g. a domain specific definition, validation rules, performance target, safety constraint, etc)."
+                "description": "A specific non-functional requirement, rule, definition or constraint that influences design or implementation.",
+                "body": "Describe a single non-functional requirement with:\n- Category (e.g. performance, security, availability, usability, compliance)\n- Target or constraint in measurable terms (numbers, thresholds, limits)\n- Scope (which processes, endpoints, components or the whole system it applies to)\n- Priority (must-have vs should-have)\n- Short note on design impact if relevant"
             }
         },
         "Components": {
             "Component": {
-                "description": "The Name of a specific Software Component (internal class component, Database, system layer, external service/server) that must exists for Core Processes/Usecases and User Stories to be implemented. The component must be referred by name.",
-                "body": "The description of the Component, its role and responsibilities, the core processes, Use Cases and user stories it is connected with, as well as any Data structore, internal/external API it manages/uses and the technologies used for the implementation."
+                "description": "The name of a specific software component (module/service/database/layer) that must exist for core processes/use cases to be implemented.",
+                "body": "Describe this component including:\n- Role and responsibilities\n- Public interface (key operations/events, not full API docs)\n- Data it owns or primarily manages (data models by name)\n- Invariants it must enforce over that data\n- Dependencies on other components or external interfaces\n- Core processes/use cases and user stories it participates in\n- Technologies and patterns used in its implementation"
             }
         },
         "CoreDataStructures": {
             "DataModel": {
-                "description": "The Name of a specific domain data structure or model used by the system.",
-                "body": "The formal definition of the data model (e.g., JSON schema, TypeScript interface, protobuf message, SQL table)."
+                "description": "The name of a specific domain data structure or model used by the system.",
+                "body": "Define the data model and its contracts:\n- Fields with types, nullability and short descriptions\n- Keys and identifiers\n- Relationships to other data models (and multiplicity where relevant)\n- Invariants that must always hold (e.g. ranges, totals, cross-field constraints)\n- Lifecycle notes (creation, updates, deletion/archival)\n- 1–2 example instances of valid data"
             }
         },
         "APIEndpoints": {
             "Endpoint": {
-                "description": "The Name of a specific logical API endpoint exposed by the system.",
-                "body": "Details of the endpoint including method, path or operation name, request/response contracts, auth, and error semantics."
+                "description": "The name of a specific logical API endpoint exposed by the system.",
+                "body": "Describe this endpoint including:\n- Operation name, method and path (or RPC name)\n- Purpose and linked core processes/use cases\n- Request contract (schema, required/optional fields, validation rules)\n- Response contract(s), including error responses\n- Authentication/authorization rules\n- Idempotency and rate limiting rules if relevant\n- Error semantics and how clients should handle them\n- Example requests and responses"
             }
         },
         "ExternalInterfaces": {
             "Interface": {
-                "description": "The Name of a specific external or hardware interface the system interacts with.",
-                "body": "Protocol details, commands, timing, transport characteristics, and data exchanged."
+                "description": "The name of a specific external or hardware interface the system interacts with.",
+                "body": "Describe the interaction contract including:\n- Protocol and transport (HTTP, gRPC, message bus, serial, etc.)\n- Message/command formats and required fields\n- Timing and ordering expectations\n- Error and retry behavior\n- Security and authentication expectations\n- Mapping to internal components and processes that use this interface"
             }
         },
         "UIComponents": {
             "Component": {
-                "description": "The Name of a specific UI component, screen, or interactive element.",
-                "body": "Description of the component, its props/inputs, state, behavior, events and interaction patterns."
+                "description": "The name of a specific UI component, screen, or interactive element.",
+                "body": "Describe this UI element including:\n- Purpose and high-level UX goal\n- Inputs/props and key state\n- User actions/events it must handle\n- State transitions and invariants (what must never happen in the UI)\n- Validation and error display rules\n- Linked use cases and core processes (by name)"
             }
         },
         "TechnologiesInvolved": {
             "Tech": {
                 "description": "The Name of a Specific Technology used in the project",
-                "body": "Specific Description of how the technology is it gonna be used in the project"
+                "body": "A short decision-style description including:\n- Exact technology and version constraints\n- Where and how it is used in the system (components/processes)\n- Key reasons for this choice (1–3 bullets)\n- Important implications or constraints (e.g. transaction model, consistency, deployment/runtime constraints)"
             }
         }
     }

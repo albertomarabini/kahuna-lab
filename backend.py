@@ -1,455 +1,191 @@
-import os, re
-import time
+import os
 import json
 import traceback
-from datetime import datetime
-import commentjson
-from sqlalchemy import create_engine, Column, Integer, String, Text, ForeignKey
-from sqlalchemy.orm import sessionmaker, declarative_base
-from sqlalchemy.exc import SQLAlchemyError
-from langchain_google_vertexai import VertexAI, ChatVertexAI
-from langchain_core.messages import HumanMessage, AIMessage
-from langchain_community.chat_message_histories.in_memory import ChatMessageHistory
-from google.cloud import secretmanager
-from google.oauth2 import service_account
-from google.auth import default as google_auth_default
-import yaml
+import asyncio
 import logging
-import sys
+import re
 
-import logging
+from sqlalchemy.orm import sessionmaker
+
+from classes.entities import Base, QueueMessage
+from classes.google_helpers import IS_LOCAL_DB, get_db_engine
+from classes.history_cache import HistoryCache
+
+
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from classes.chat_prompts import (
+    BSS_PROMPT,
+    BSS_INSTRUCTIONS,
+    BSS_TEXT_SCHEMA,
+)
+
+CHAT_PROMPT =""
+SCHEMA_UPDATE_PROMPT=""
+
+from classes.utils import Utils
+
+from classes.schema_manager import SchemaManager
+
+from dotenv import load_dotenv
+
+load_dotenv()
 
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s | %(levelname)s | %(name)s\n%(message)s\n"
 )
-
 logger = logging.getLogger("kahuna_backend")
 
-from classes.schema_manager import SchemaManager
-from classes.backend_prompts import CHAT_PROMPT, SCHEMA_UPDATE_PROMPT
-from dotenv import load_dotenv
-load_dotenv()
-
-# --- Configuration ---
-PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT", "your-project-id")
-REGION = os.getenv("GOOGLE_CLOUD_REGION", "us-central1")
-
-DB_HOST             = os.environ.get("DB_HOST", "localhost")
-DB_PORT             = int(os.environ.get("DB_PORT", "5432"))
-DB_NAME             = os.environ["DB_NAME"]
-DB_USER             = os.environ["DB_USER"]
-DB_PASSWORD         = os.environ.get("DB_PASSWORD")
-DB_SECRET_ID        = os.environ.get("DB_SECRET_ID")
-
-IS_LOCAL_DB = (DB_HOST == "localhost")
-
-EVENTS_REQUEST_DIR = "events/request"
-EVENTS_RESPONSE_DIR = "events/response"
-
-# --- Database Setup ---
-Base = declarative_base()
-
-class User(Base):
-    __tablename__ = 'users'
-    id = Column(Integer, primary_key=True)
-    username = Column(String, unique=True, nullable=False)
-
-class Project(Base):
-    __tablename__ = 'projects'
-    id = Column(Integer, primary_key=True)
-    name = Column(String, nullable=False)
-    user_id = Column(Integer, ForeignKey('users.id'))
-    content = Column(Text, nullable=False) # Stores requirements.json content
-
-
-def _build_creds():
-    key_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-    scopes = ["https://www.googleapis.com/auth/cloud-platform"]
-    if key_path and os.path.exists(key_path):
-        return service_account.Credentials.from_service_account_file(key_path, scopes=scopes)
-    creds, _ = google_auth_default(scopes=scopes)
-    return creds
-
-
-def get_db_password() -> str:
-    global DB_PASSWORD
-
-    if DB_PASSWORD:
-        return DB_PASSWORD
-
-    if DB_SECRET_ID:
-        creds = _build_creds()
-        client = secretmanager.SecretManagerServiceClient(credentials=creds)
-        name = client.secret_version_path(PROJECT_ID, DB_SECRET_ID, "latest")
-        resp = client.access_secret_version(request={"name": name})
-        DB_PASSWORD = resp.payload.data.decode("utf-8")
-        return DB_PASSWORD
-
-    raise RuntimeError("No DB_PASSWORD and no Secret Manager configured")
-
-
-def get_db_engine():
-    password = get_db_password()
-
-    if DB_HOST == "localhost":
-        url = "sqlite:///requirements.db"
-        logger.info(f"[DB] Using SQLite URL: {url}")
-        return create_engine(url)
-
-    url = f"postgresql+pg8000://{DB_USER}:{password}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-    logger.info(f"[DB] Connecting to Postgres URL: {url}")
-
-    # pg8000 supports 'timeout' in seconds
-    return create_engine(
-        url,
-        connect_args={"timeout": 10},  # fail in 10s instead of hanging forever
-    )
+QUEUE_RECEIVER_ID = os.getenv("QUEUE_RECEIVER_ID")
 
 # --- Backend Logic ---
 
-class Backend:
+class Backend(Utils):
     def __init__(self):
         self.engine = get_db_engine()
         Base.metadata.create_all(self.engine)
         self.Session = sessionmaker(bind=self.engine)
-        # Initialize LLM
+
+        # Initialize default LLMs (used as fallback only)
         try:
-            self.llm = VertexAI(
-                project=PROJECT_ID,
-                location=REGION,
-                model_name="gemini-2.5-flash-lite",
-            )
-            self.chat_llm = ChatVertexAI(
-                project=PROJECT_ID,
-                location=REGION,
-                model="gemini-2.5-flash-lite",
-            )
+            default_model = "gemini-2.5-flash-lite"
+            self.default_llm, self.default_chat_llm = self._build_llms_for_model(default_model)
         except Exception as e:
             logger.info(f"Warning: Could not initialize VertexAI: {e}. Using mock.")
-            self.llm = None
-            self.chat_llm = None
-        self.schema_manager = SchemaManager(self.llm)
-        self.histories = {}
+            self.default_llm = None
+            self.default_chat_llm = None
+
+        self.history_cache = HistoryCache(ttl_seconds=24 * 3600, max_tokens=8000)
 
         # Load Requirements Schema
         with open("./classes/requirements_schema.json", "r") as f:
             self.requirements_schema = json.load(f)
 
-    def unsafe_string_format(self, dest_string, print_unused_keys_report=True, **kwargs):
-        """
-        Formats a destination string by replacing placeholders with corresponding values from kwargs.
-        If any placeholder key in the string is not found in kwargs, it raises a ValueError.
+        # BSS Chat
+        self.bss_history_cache = HistoryCache(ttl_seconds=24 * 3600, max_tokens=8000)
+        self._bss_labels = self._bss_section_order()
 
-        it works differently from the standard "format" method as instead of looking for all the potential keys, looks only for the keys as passed in kwargs
-        """
-        # List to track keys that were not found
-        missing_keys = []
-        # Regex pattern to match placeholders like {key}
-        def replacer(match):
-            key = match.group(1)
-            if key in kwargs:
-                return str(kwargs[key])
-            else:
-                missing_keys.append(key)
-                return match.group(0)  # Leave the placeholder unchanged
+    # -----------------------
+    # Queue worker entrypoint
+    # -----------------------
 
-        pattern = re.compile(r'\{(\w+)\}')
-        result = pattern.sub(replacer, dest_string)
-        if missing_keys and print_unused_keys_report:
-            logger.info(f"\033[93m\033[3mMissing keys within string-to-format in unsafe_string_format: {', '.join(missing_keys)}\033[0m", flush=True)
-            # print(f"\033[93m\033[3mOriginal string: {dest_string}\033[0m", flush=True)
-        return result
-
-    def process_request(self, request_file):
+    def process_queue_job(self, job: dict) -> None:
+        session = self.Session()
         try:
-            with open(os.path.join(EVENTS_REQUEST_DIR, request_file), "r") as f:
-                request_data = json.load(f)
+            project_id = str(job.get("sender_id"))
+            msg_type = job.get("type") or "unknown"
+
+            response_data = self._process_request_data(job)
+
+            response_msg = QueueMessage(
+                sender_id=str(job.get("receiver_id")),  # this worker
+                receiver_id=project_id,                 # original sender project_id (your contract)
+                type=f"{msg_type}_response",
+                payload=response_data,
+            )
+            session.add(response_msg)
+            session.commit()
+
+        except Exception as e:
+            logger.info(f"Error processing queue job {job.get('id')}: {e}")
+            session.rollback()
+            traceback.print_exc()
+        finally:
+            session.close()
+
+
+    def _process_request_data(self, request_data: dict) -> dict:
+        """
+        Core request handling logic.
+        Takes a parsed JSON dict and returns the response_data dict.
+        """
+        try:
+            request_type = request_data.get("type")
+            payload = request_data.get("payload")
+            project_id = str(request_data.get("sender_id"))
 
             try:
                 preview = json.dumps(request_data, indent=2)
             except Exception:
                 preview = str(request_data)
-            logger.debug("process_request request payload=\n%s", preview)
 
-            request_type = request_data.get("type")
-            username = request_data.get("username")
-            project_name = request_data.get("project_name")
-            payload = request_data.get("payload")
+            logger.debug(f"process_request request {preview}")
 
             response_data = {
                 "status": "success",
                 "message": "",
-                "username": username,
-                "project_name": project_name,
+                "project_id": project_id,
             }
 
             if request_type == "load_project":
                 response_data["data"] = {}
-                response_data["data"]["updated_schema"] = self.load_project(username, project_name)
+                response_data["data"]["updated_schema"] = self.load_project(project_id)
+                response_data["data"]["bss_schema"] = self._redact_bss_schema_for_ui(
+                    self.load_bss_schema(project_id)
+                )
+                response_data["data"]["bss_labels"] = self._bss_labels
+
             elif request_type == "save_project":
-                self.save_project(username, project_name, payload)
+                self.save_project(project_id, payload)
                 response_data["message"] = "Project saved."
+
+            elif request_type == "bss_chat":
+                response_data["data"] = self.handle_bss_chat(project_id, payload)
+
+            elif request_type == "edit_bss_document":
+                response_data["data"] = self.handle_edit_bss_document(project_id, payload)
+
             elif request_type == "chat":
-                response_data["data"] = self.handle_chat(username, project_name, payload)
+                response_data["data"] = self.handle_chat(project_id, payload)
+
             elif request_type == "add_comment":
-                response_data["data"] = self.handle_comment(username, project_name, payload)
+                response_data["data"] = self.handle_comment(project_id, payload)
+
             elif request_type == "delete_node":
-                response_data["data"] = self.handle_delete_node(username, project_name, payload)
+                response_data["data"] = self.handle_delete_node(project_id, payload)
+
             elif request_type == "update_node" or request_type == "add_node":
-                response_data["data"] = self.handle_direct_schema_command(username, project_name, payload)
-            elif request_type == "is_worker_busy":
-                response_data["data"] = self.is_worker_busy()
+                response_data["data"] = self.handle_direct_schema_command(project_id, payload)
+
             elif request_type == "submit_job":
                 response_data["data"] = self.handle_submit_job(payload)
+
             elif request_type == "job_status":
                 response_data["data"] = self.handle_job_status(payload)
+
             else:
                 response_data["status"] = "error"
                 response_data["message"] = f"Unknown request type: {request_type}"
-
-            def _sanitize_for_filename(s: str) -> str:
-                if not s:
-                    return ""
-                # letters, digits, _ . - only
-                return re.sub(r"[^A-Za-z0-9_.-]", "_", s)
-
-            # Write response
-            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-            safe_user = _sanitize_for_filename(username)
-            safe_project = _sanitize_for_filename(project_name)
-            response_filename = f"{safe_user}__{safe_project}__{timestamp}.json"
-            with open(os.path.join(EVENTS_RESPONSE_DIR, response_filename), "w") as f:
-                json.dump(response_data, f)
 
             try:
                 preview = json.dumps(response_data, indent=2)
             except Exception:
                 preview = str(response_data)
-            logger.debug("process_request response payload=\n%s", preview)
 
+            logger.debug(f"response {preview}")
 
-            # Clean up request
-            os.remove(os.path.join(EVENTS_REQUEST_DIR, request_file))
+            return response_data
 
         except Exception as e:
-            logger.info(f"Error processing request {request_file}: {e}")
-            traceback.logger.info_exc()
-
-    def load_project(self, username, project_name):
-        session = self.Session()
-        try:
-            user = session.query(User).filter_by(username=username).first()
-            if not user:
-                user = User(username=username)
-                session.add(user)
-                session.commit()
-
-            project = session.query(Project).filter_by(user_id=user.id, name=project_name).first()
-            if not project:
-                initial_content = json.dumps({
-                    "Project": {
-                        "description": "",
-                        "UserStories": {},
-                        "CoreProcesses": {},
-                        "NonFunctionalRequirements": {},
-                        "Components": {},
-                        "CoreDataStructures": {},
-                        "APIEndpoints": {},
-                        "ExternalInterfaces": {},
-                        "UIComponents": {},
-                        "TechnologiesInvolved": {}
-                    }
-                })
-                project = Project(name=project_name, user_id=user.id, content=initial_content)
-                session.add(project)
-                session.commit()
-
-            content = project.content  # materialize before closing session
-        finally:
-            session.close()
-
-        return json.loads(content)
-
-    def save_project(self, username, project_name, content):
-        session = self.Session()
-        user = session.query(User).filter_by(username=username).first()
-        project = session.query(Project).filter_by(user_id=user.id, name=project_name).first()
-        project.content = json.dumps(content)
-        session.commit()
-        session.close()
-
-    def _conversation_key(self, username, project_name):
-        return f"{username}::{project_name}"
-
-    def _get_history(self, username, project_name) -> ChatMessageHistory:
-        key = self._conversation_key(username, project_name)
-        if key not in self.histories:
-            self.histories[key] = ChatMessageHistory()
-        return self.histories[key]
-
-    def _safe_error_response(self, current_schema, error: Exception):
-        logger.info(f"[handle_chat] Error: {error}")
-        traceback.print_exc()
-
-        return {
-            "bot_message": (
-                "I ran into an internal error while processing your request. "
-                "Nothing was changed in the requirements. Please retry your last message."
-            ),
-            "updated_schema": current_schema,
-            "discrepancies": [],
-            "schema_change_description": "",
-            "updated_project_description": ""
-        }
+            logger.info(f"Error while processing request data: {e}")
+            traceback.print_exc()
+            raise
 
 
-    def color_print(self, text, color=None, end_value=None):
-        COLOR_CODES = {
-            'black': '30', 'red': '31', 'green': '32', 'yellow': '33', 'blue': '34', 'magenta': '35',
-            'cyan': '36', 'white': '37', 'bright_black': '90', 'bright_red': '91', 'bright_green': '92',
-            'bright_yellow': '93', 'bright_blue': '94', 'bright_magenta': '95', 'bright_cyan': '96', 'bright_white': '97'
-        }
-        if color and color.lower() in COLOR_CODES:
-            color_code = COLOR_CODES[color.lower()]
-            start = f"\033[{color_code}m"
-            end = "\033[0m"
-            text = f"{start}{text}{end}"
-        logger.info(str(text))
-        return False
-
-    def clean_triple_backticks(self, code) -> str:
-        pattern = r'```[a-zA-Z]*\n?|```\n?'
-        return re.sub(pattern, '', code)
-
-    def load_fault_tolerant_json(self, json_str, ensure_ordered=False):
-        """
-        Attempts to load a JSON-like string using pyyaml for fault tolerance.
-        Returns a dictionary if successful; otherwise, returns an empty dictionary.
-        """
-        def sanitize_json_string(input_str):
-            """
-            Sanitizes a JSON string containing C-like syntax.
-            - Escapes problematic characters inside strings.
-            - Removes comments safely without altering string content.
-            - Preserves the integrity of embedded C-like code.
-            Args:
-                input_str (str): The raw JSON string to sanitize.
-            Returns:
-                str: A sanitized JSON string.
-            """
-
-            def process_string_segment(match):
-                """
-                Processes and sanitizes individual JSON string segments.
-                - Handles escape sequences and literal newlines inside strings.
-                """
-                content = match.group(1)  # Extract the string content without surrounding quotes
-
-                # Step 1: Escape unescaped backslashes not part of escape sequences
-                content = re.sub(r'(?<!\\)\\(?![bfnrtu"\\/])', r'\\\\', content)
-
-                # Step 2: Replace literal newlines within the string content
-                content = re.sub(r'(?<!\\)\n', r'\\n', content)
-
-                # Step 3: Escape unescaped double quotes inside strings
-                content = re.sub(r'(?<!\\)"', r'\"', content)
-
-                # Wrap the sanitized content back in double quotes
-                return f'"{content}"'
-
-            # Step 1: Remove comments outside of strings
-            def remove_comments(input_str):
-                """
-                Removes comments (single-line // and multi-line /* */) from JSON,
-                while ignoring comments inside string literals.
-                """
-                # Remove single-line comments
-                no_single_line_comments = re.sub(r'//.*?$|/\*.*?\*/', '', input_str, flags=re.MULTILINE | re.DOTALL)
-                return no_single_line_comments
-
-            # Step 2: Process strings to protect their content
-            def sanitize_strings(input_str):
-                """
-                Sanitizes JSON strings to escape problematic characters.
-                """
-                sanitized_json = re.sub(r'(?<!\\)"((?:[^"\\]|\\.)*?)"', process_string_segment, input_str, flags=re.DOTALL)
-                return sanitized_json
-            # Remove code markers
-            input_str = self.clean_triple_backticks(input_str)
-            # Clean code markers and comments first
-            input_str = remove_comments(input_str)
-            # Then sanitize strings to ensure proper escaping
-            sanitized_json = sanitize_strings(input_str)
-
-            return sanitized_json
-        def load_json(json_str, ensure_ordered):
-            from collections import OrderedDict
-            err, data = "", None
-            try:
-                if ensure_ordered:
-                    data = commentjson.loads(self.clean_triple_backticks(json_str), object_pairs_hook=OrderedDict)
-                else:
-                    data = commentjson.loads(self.clean_triple_backticks(json_str))
-                return data, ""
-            except Exception as e:
-                err = str(e)
-                data = None
-            try:
-                data = yaml.safe_load(sanitize_json_string(json_str))
-                if isinstance(data, str):
-                    raise Exception("load_fault_tolerant_json: YAML parsing failed.")
-                return data, ""
-            except Exception as e:
-                err += "\n--\n" + str(e)
-                data = None
-            return data, err
-
-        data, err = load_json(json_str, ensure_ordered)
-        if data:
-            return data
-        from json_repair import repair_json
-        repaired_json_str = repair_json(json_str)
-        r_data, r_err = load_json(repaired_json_str, ensure_ordered)
-        if r_data:
-            return r_data
-        self.color_print(f"load_fault_tolerant_json: JSON parsing failed: {r_err}. \nTrying LLM recovery...", color="red")
-        prompt = f"""
-I encountered an issue while parsing the following JSON data. Here is the original JSON string:
-```
-{json_str}
-```
-The error message was: {r_err}
-Can you fix it?
-
-Please return the corrected JSON string and nothing else, as further comments would screw up the JSON parsing.
-If you think the JSON is correct, please return the JSON as it is. Again, no further comments.
-Thanks :)
-        """
-        repaired_json_str = self.llm.invoke(prompt)
-        r_data, r_err = load_json(repaired_json_str, ensure_ordered)
-        if r_data:
-            return r_data
-        raise Exception(f"load_fault_tolerant_json: JSON parsing failed: {r_err} \n- Original JSON: {json_str}")
-
-    def _coerce_field_to_str(self, value) -> str:
-        if value is None:
-            return ""
-        if isinstance(value, str):
-            return value.strip()
-        try:
-            return json.dumps(value, indent=2)
-        except TypeError:
-            return str(value).strip()
-
-    def _run_schema_update_with_retry(self, current_schema, combined_instruction: str, max_retries: int = 3):
+    def _run_schema_update_with_retry(
+        self,
+        schema_manager,
+        llm,
+        current_schema,
+        combined_instruction: str,
+        max_retries: int = 3
+    ):
         current_schema_json = json.dumps(current_schema)
         last_discrepancies = []
         last_llm_response = ""
 
         for attempt in range(1, max_retries + 1):
             if last_discrepancies:
-                # Enrich the original combined_instruction with validation feedback
                 retry_instruction = f"""
 {combined_instruction}
 
@@ -472,8 +208,8 @@ You must fix the problems above and propose a corrected set of commands.
                 combined_instruction=retry_instruction
             )
 
-            if self.llm:
-                llm_resp_obj = self.llm.invoke(schema_prompt)
+            if llm:
+                llm_resp_obj = llm.invoke(schema_prompt)
             else:
                 llm_resp_obj = '{"insert": [], "update": [], "delete": []}'
 
@@ -484,7 +220,7 @@ You must fix the problems above and propose a corrected set of commands.
 
             last_llm_response = llm_response
 
-            updated_schema_str, last_discrepancies, _ = self.schema_manager.apply_commands_to_schema(
+            updated_schema_str, last_discrepancies, _ = schema_manager.apply_commands_to_schema(
                 current_schema_json, llm_response, self.requirements_schema
             )
 
@@ -492,41 +228,206 @@ You must fix the problems above and propose a corrected set of commands.
                 updated_schema = json.loads(updated_schema_str)
                 return updated_schema, []
 
-        # If we get here, all attempts failed
         raise Exception(f"Schema update failed after {max_retries} attempts. Discrepancies: {last_discrepancies}")
 
-    def _build_llms_for_model(self, model_name: str):
-        """
-        Build per-request LLM instances for the given model name.
-        Falls back to None/None if creation fails.
-        """
-        try:
-            self.llm = VertexAI(
-                project=PROJECT_ID,
-                location=REGION,
-                model_name=model_name,
-            )
-            self.chat_llm = ChatVertexAI(
-                project=PROJECT_ID,
-                location=REGION,
-                model=model_name,
-            )
-        except Exception as e:
-            logger.info(f"Warning: Could not initialize VertexAI model '{model_name}': {e}. Using mock.")
-            raise e
+    # -----------------------
+    # Handlers
+    # -----------------------
 
-    def handle_chat(self, username, project_name, payload):
-        # Extract data from payload
+    def handle_bss_chat(self, project_id: str, payload):
+        payload = payload or {}
+        user_text = (payload.get("text") or "").strip()
+
+        llm, chat_llm = self._build_llms_for_payload(payload)
+
+        current_bss = self.load_bss_schema(project_id)
+
+        # PRE: build prompt inputs
+        current_document = self._bss_current_document_for_prompt(current_bss)
+        registry_ledger = self._build_registry_ledger(current_bss)
+        registry_ledger_json = json.dumps(registry_ledger, indent=2)
+
+        prompt = self.unsafe_string_format(
+            BSS_PROMPT,
+            USER_QUESTION=user_text,
+            BSS_TEXT_SCHEMA=BSS_TEXT_SCHEMA,
+            CURRENT_DOCUMENT=current_document,
+            REGISTRY_LEDGER=registry_ledger_json,
+        )
+
+        print("===============Prompt\n\n" + prompt)
+
+        if chat_llm:
+            messages_for_llm = [SystemMessage(content=BSS_INSTRUCTIONS)]
+            messages_for_llm.extend(self.bss_history_cache.snapshot(project_id))
+            messages_for_llm.append(HumanMessage(content=prompt))
+            raw = chat_llm.invoke(messages_for_llm)
+            raw = getattr(raw, "content", str(raw))
+        else:
+            raw = 'NEXT_QUESTION:"Mock question?"'
+
+        print("===============Server Response\n\n" + raw)
+
+        raw_clean = self.clean_triple_backticks(raw).strip()
+
+        slot_updates, next_question, malformed_json_found = self._parse_bss_output(raw_clean, llm=llm)
+
+        # Emergency self-heal: ask the LLM to fix malformed items immediately.
+        # This exchange is NOT written to bss_history_cache.
+        if malformed_json_found and chat_llm:
+            fix_directive = (
+                "There are malformed items in the document / your last output. "
+                "Please fix them and re-emit a corrected response in the exact required format:\n"
+                "- One or more '<LABEL>:\"status\":...,\"definition\":...,...' lines (no outer braces)\n"
+                "- Exactly one 'NEXT_QUESTION: ...' line\n"
+                "No extra commentary, no code fences."
+            )
+
+            messages_fix = [SystemMessage(content=BSS_INSTRUCTIONS)]
+            messages_fix.extend(self.bss_history_cache.snapshot(project_id))
+            messages_fix.append(HumanMessage(content=prompt))
+            messages_fix.append(AIMessage(content=raw_clean))      # the malformed output
+            messages_fix.append(HumanMessage(content=fix_directive))
+
+            raw2 = chat_llm.invoke(messages_fix)
+            raw2 = getattr(raw2, "content", str(raw2))
+            raw2 = self.clean_triple_backticks(raw2).strip()
+
+            slot_updates, next_question, malformed_json_found = self._parse_bss_output(raw2, llm=llm)
+
+        # If still malformed after retry, do not mutate DB or history; return current state.
+        if malformed_json_found:
+            return {
+                "bot_message": "I produced malformed structured output. Please resend your last message.",
+                "bss_schema": self._redact_bss_schema_for_ui(current_bss),
+                "bss_labels": self._bss_labels,
+            }
+
+        deleted_labels = self._collect_deleted_labels_from_slot_updates(slot_updates)
+
+        updated_bss = self._apply_bss_slot_updates(current_bss, slot_updates)
+
+        # Emergency cleanup: only if something was deleted AND it is still referenced elsewhere
+        if deleted_labels and self._bss_any_item_references_labels(updated_bss, deleted_labels):
+            updated_bss = self._emergency_purge_deleted_labels_from_references(updated_bss, deleted_labels)
+
+        # POST: recompute host-maintained dependency fields for ALL items
+        updated_bss = self._recompute_bss_dependency_fields(updated_bss)
+
+        self.save_bss_schema(project_id, updated_bss)
+
+        self.bss_history_cache.append_turn(project_id, user_text, next_question)
+
+        return {
+            "bot_message": next_question,
+            "bss_schema": self._redact_bss_schema_for_ui(updated_bss),
+            "bss_labels": self._bss_labels,
+        }
+
+
+
+    def handle_edit_bss_document(self, project_id: str, payload):
+        payload = payload or {}
+        label = (payload.get("label") or payload.get("Label") or "").strip()
+        content = payload.get("content")
+
+        if not label or not self._is_bss_label(label):
+            raise ValueError(f"Unknown or missing BSS label: {label}")
+
+        if not isinstance(content, dict):
+            raise ValueError("edit_bss_document payload.content must be an object")
+
+        section = self._bss_section_for_label(label)
+        if not section:
+            raise ValueError(f"Could not map label to section: {label}")
+
+        new_status = content.get("status")
+        new_definition = content.get("definition")
+        if new_definition is None:
+            new_definition = content.get("value")  # back-compat for UI callers still sending "value"
+
+        cancelled = bool(content.get("cancelled", False))
+
+        if new_status is None and new_definition is None and ("cancelled" not in content):
+            raise ValueError("edit_bss_document payload.content must include 'status' and/or 'definition'/'value' and/or 'cancelled'")
+
+        current_bss = self.load_bss_schema(project_id)
+        if not isinstance(current_bss, dict):
+            current_bss = {}
+
+        current_bss.setdefault(section, {})
+
+        # Start from existing canonical representation
+        existing = self._normalize_bss_item(current_bss[section].get(label))
+
+        if cancelled:
+            current_bss[section].pop(label, None)
+            if not current_bss[section]:
+                current_bss.pop(section, None)
+        else:
+            if new_status is not None:
+                existing["status"] = new_status
+            if new_definition is not None:
+                existing["definition"] = self._coerce_field_to_str(new_definition)
+
+            # Never persist deleted; cancelled is the only supported boolean here
+            existing["cancelled"] = False
+
+            current_bss[section][label] = existing
+
+        # Keep host-maintained fields consistent
+        current_bss = self._recompute_bss_dependency_fields(current_bss)
+
+        self.save_bss_schema(project_id, current_bss)
+
+        return {
+            "bss_schema": self._redact_bss_schema_for_ui(current_bss),
+            "bss_labels": self._bss_labels,
+        }
+
+
+
+
+    def _apply_bss_slot_updates(self, current_bss: dict, slot_updates: dict) -> dict:
+        if not isinstance(current_bss, dict):
+            current_bss = {}
+
+        for label, obj in (slot_updates or {}).items():
+            if not self._is_bss_label(label):
+                continue
+
+            section = self._bss_section_for_label(label)
+            if not section:
+                continue
+
+            norm = self._normalize_bss_item(obj)
+
+            # If cancelled -> physically remove
+            if norm.get("cancelled") is True:
+                if section in current_bss and isinstance(current_bss[section], dict):
+                    current_bss[section].pop(label, None)
+                    if not current_bss[section]:
+                        current_bss.pop(section, None)
+                continue
+
+            current_bss.setdefault(section, {})
+            current_bss[section][label] = norm
+
+        return current_bss
+
+
+
+
+    def handle_chat(self, project_id: str, payload):
+        payload = payload or {}
         message = (payload or {}).get("text", "") or ""
-        llm_model = (payload or {}).get("llm_model") or "gemini-2.5-flash-lite"
-        self._build_llms_for_model(llm_model)
 
-        # Load current schema from DB
-        current_schema = self.load_project(username, project_name)
-        history = self._get_history(username, project_name)
+        llm, chat_llm = self._build_llms_for_payload(payload)
+
+        current_schema = self.load_project(project_id)
+        schema_manager = SchemaManager(llm)
 
         try:
-            # ---------- 1) CHAT + CHANGE REASONING CALL ----------
             chat_prompt = self.unsafe_string_format(
                 CHAT_PROMPT,
                 current_schema_json=json.dumps(current_schema, indent=2),
@@ -534,37 +435,34 @@ You must fix the problems above and propose a corrected set of commands.
                 user_message=message
             )
 
-            if self.chat_llm:
-                messages_for_llm = list(history.messages)
+            if chat_llm:
+                messages_for_llm = self.history_cache.snapshot(project_id)
                 messages_for_llm.append(HumanMessage(content=chat_prompt))
-                raw = self.chat_llm.invoke(messages_for_llm)
+                raw = chat_llm.invoke(messages_for_llm)
             else:
                 raw = '{"assistant_message": "Mock reply", "schema_change_description": "", "updated_project_description": ""}'
 
             raw = getattr(raw, "content", str(raw))
+
             assistant_message, schema_change_description, updated_project_description = "", "", ""
             try:
-                chat_obj = self.load_fault_tolerant_json(raw)
+                chat_obj = self.load_fault_tolerant_json(raw, llm=llm)
                 assistant_message = self._coerce_field_to_str((chat_obj.get("assistant_message") or "")).strip()
                 schema_change_description = self._coerce_field_to_str((chat_obj.get("schema_change_description") or "")).strip()
                 updated_project_description = self._coerce_field_to_str((chat_obj.get("updated_project_description") or "")).strip()
                 logger.info(f"Schema Changes Required: {schema_change_description}")
             except Exception as e:
-                logger.error("Error While Processing Chat Message\n{e}\n{raw}")
+                logger.error(f"Error While Processing Chat Message\n{e}\n{raw}")
 
-            # Update LC history (no DB)
             if assistant_message:
-                history.add_message(HumanMessage(content=message))
-                history.add_message(AIMessage(content=assistant_message))
+                self.history_cache.append_turn(project_id, message, assistant_message)
             else:
-                raise Exception()
+                raise Exception("No assistant_message parsed from LLM response")
 
             updated_schema = current_schema
             discrepancies = []
 
-            # ---------- 2) SCHEMA UPDATE CALL (only if changes are needed) ----------
             if schema_change_description or updated_project_description:
-                # Reuse the existing "big" prompt, but feed it a combined description
                 combined_instruction = f"""
 Schema change description (natural language plan of changes):
 {schema_change_description or "(none)"}
@@ -578,13 +476,14 @@ IMPORTANT FOR THIS STEP:
   exactly to that string in the mandatory update for $.Project.
 """
                 updated_schema, discrepancies = self._run_schema_update_with_retry(
+                    schema_manager=schema_manager,
+                    llm=llm,
                     current_schema=current_schema,
                     combined_instruction=combined_instruction,
                     max_retries=3,
                 )
-                self.save_project(username, project_name, updated_schema)
+                self.save_project(project_id, updated_schema)
 
-            # ---------- FINAL RESPONSE TO FRONTEND ----------
             return {
                 "bot_message": assistant_message,
                 "updated_schema": updated_schema,
@@ -596,16 +495,20 @@ IMPORTANT FOR THIS STEP:
             logger.warning(f"Error while executing a prompt {e}")
             return self._safe_error_response(current_schema, e)
 
-    def handle_comment(self, username, project_name, payload):
+    def handle_comment(self, project_id: str, payload):
+        payload = payload or {}
         path = payload.get("path")
         comment = payload.get("comment")
-        current_schema = self.load_project(username, project_name)
+
+        current_schema = self.load_project(project_id)
+
+        llm, _ = self._build_llms_for_payload(payload)
+        schema_manager = SchemaManager(llm)
 
         try:
-            # Grab the current item so the LLM sees exactly what it's touching
-            current_item = self.schema_manager.get_fuzzy_nested_node(
+            current_item = schema_manager.get_fuzzy_nested_node(
                 current_schema,
-                path.split(".")
+                (path or "").split(".")
             )
 
             combined_instruction = f"""
@@ -635,15 +538,15 @@ MANDATORY:
 - As always, include the mandatory update operation for $.Project that refreshes
   $.Project.description to reflect the change introduced by this comment.
 """
-
-            # Run through the same robust schema update pipeline with retries
             updated_schema, discrepancies = self._run_schema_update_with_retry(
+                schema_manager=schema_manager,
+                llm=llm,
                 current_schema=current_schema,
                 combined_instruction=combined_instruction,
                 max_retries=3,
             )
 
-            self.save_project(username, project_name, updated_schema)
+            self.save_project(project_id, updated_schema)
 
             return {
                 "bot_message": f"I've processed your comment on {path}.",
@@ -652,99 +555,16 @@ MANDATORY:
             }
 
         except Exception as e:
-            # Reuse the same safe error response shape as handle_chat
             return self._safe_error_response(current_schema, e)
 
-    def handle_direct_schema_command(self, username, project_name, payload):
-        # Load current schema (dict)
-        current_schema = self.load_project(username, project_name)
-        current_schema_json = json.dumps(current_schema)
 
-        updated_schema_str, discrepancies, _ = self.schema_manager.apply_commands_to_schema(
-            current_schema_json,
-            json.dumps(payload),
-            self.requirements_schema
-        )
-        updated_schema = json.loads(updated_schema_str)
-        if not discrepancies:
-            self.save_project(username, project_name, updated_schema)
+    # -----------------------
+    # jobs
+    # -----------------------
 
-        return {
-            "updated_schema": updated_schema,
-            "discrepancies": discrepancies,
-        }
-
-
-    def handle_delete_node(self, username, project_name, payload):
-        path = (payload or {}).get("path", "") or ""
-        if not path:
-            # reuse safe response shape
-            current_schema = self.load_project(username, project_name)
-            return self._safe_error_response(current_schema, ValueError("Missing 'path' in delete_node payload"))
-
-        # Normalize path: ensure it starts with "$."
-        if path.startswith("$."):
-            normalized_path = path
-        elif path.startswith("$"):
-            normalized_path = "$." + path[1:]
-        else:
-            normalized_path = "$." + path
-
-        # Load current schema (dict)
-        current_schema = self.load_project(username, project_name)
-        current_schema_json = json.dumps(current_schema)
-
-        # Build a minimal delete command for SchemaManager
-        delete_command = json.dumps({
-            "delete": [
-                {"path": normalized_path}
-            ]
-        })
-        try:
-            updated_schema_str, discrepancies, _ = self.schema_manager.apply_commands_to_schema(
-                current_schema_json,
-                delete_command,
-                self.requirements_schema
-            )
-            updated_schema = json.loads(updated_schema_str)
-            if not discrepancies:
-                self.save_project(username, project_name, updated_schema)
-            return {
-                "bot_message": f"Node at path '{normalized_path}' has been deleted." if not discrepancies
-                               else f"Could not safely delete node at '{normalized_path}'.",
-                "updated_schema": updated_schema,
-                "discrepancies": discrepancies,
-            }
-        except Exception as e:
-            return self._safe_error_response(current_schema, e)
-
-    def is_worker_busy(self):
-        if IS_LOCAL_DB:
-            return {"is_worker_busy": True}
-        conn = None
-        try:
-            conn = self.engine.raw_connection()
-            cursor = conn.cursor()
-            cursor.execute("SELECT is_busy FROM worker_state WHERE id = 'singleton'")
-            row = cursor.fetchone()
-            cursor.close()
-
-            is_busy = bool(row and row[0])
-            return {"is_worker_busy": is_busy}
-
-        except Exception as e:
-            self.color_print(f"is_worker_busy(): DB error -> {e}", color="red")
-            return {"is_worker_busy": True}
-        finally:
-            if conn is not None:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
 
     def handle_submit_job(self, payload):
         if IS_LOCAL_DB:
-            # In local / debug mode, remote worker queue is disabled.
             return {
                 "job_id": None,
                 "status": "disabled_in_local_mode",
@@ -759,8 +579,9 @@ MANDATORY:
                 "message": "submit_job payload must be a JSON object"
             }
 
-        # Force a default model if not provided (similar spirit to the admin check)
-        client_payload.setdefault("model", "gemini-2.5-flash-lite")
+        existing_model = self._detect_llm_model_in_payload(client_payload)
+        if not existing_model:
+            client_payload["model"] = "gemini-2.5-flash-lite"
 
         job_id = f"job_{os.urandom(8).hex()}"
 
@@ -867,19 +688,116 @@ MANDATORY:
                 except Exception:
                     pass
 
-    def run(self):
-        logger.info("Backend running...")
-        if not os.path.exists(EVENTS_REQUEST_DIR):
-            os.makedirs(EVENTS_REQUEST_DIR)
-        if not os.path.exists(EVENTS_RESPONSE_DIR):
-            os.makedirs(EVENTS_RESPONSE_DIR)
+    def run(self, poll_interval: float = 1.0, max_concurrent: int = 4) -> None:
+        if not QUEUE_RECEIVER_ID:
+            raise RuntimeError("QUEUE_RECEIVER_ID env var is required for DB queue mode")
+
+        guard = AsyncGuard(
+            backend=self,
+            receiver_id=QUEUE_RECEIVER_ID,
+            poll_interval=poll_interval,
+            max_concurrent=max_concurrent,
+        )
+        asyncio.run(guard.run())
+
+
+class Executor:
+    def __init__(self, backend: "Backend"):
+        self.backend = backend
+
+    def execute(self, job: dict) -> None:
+        self.backend.process_queue_job(job)
+
+
+class AsyncGuard:
+    def __init__(
+        self,
+        backend: "Backend",
+        receiver_id: str,
+        poll_interval: float = 1.0,
+        max_concurrent: int = 4,
+    ):
+        self.backend = backend
+        self.receiver_id = receiver_id
+        self.poll_interval = poll_interval
+        self.max_concurrent = max_concurrent
+        self._in_flight = set()
+
+    async def _run_executor_for_message(self, job: dict) -> None:
+        executor = Executor(self.backend)
+        try:
+            await asyncio.to_thread(executor.execute, job)
+        finally:
+            self._in_flight.discard(job["id"])
+
+
+    async def run(self) -> None:
+        logger.info(
+            "AsyncGuard running – receiver_id=%s (max_concurrent=%d)",
+            self.receiver_id,
+            self.max_concurrent,
+        )
 
         while True:
-            files = sorted(os.listdir(EVENTS_REQUEST_DIR))
-            for file in files:
-                if file.startswith("server_"):
-                    self.process_request(file)
-            time.sleep(1)
+            # REQUIRED: sweep stale history every cycle
+            removed = self.backend.history_cache.sweep_expired()
+            if removed:
+                logger.debug("HistoryCache sweep: removed %d expired histories", removed)
+            removed2 = self.backend.bss_history_cache.sweep_expired()
+            if removed2:
+                logger.debug("BSS HistoryCache sweep: removed %d expired histories", removed2)
+
+            available_slots = self.max_concurrent - len(self._in_flight)
+            if available_slots <= 0:
+                print("enqueing")
+                await asyncio.sleep(self.poll_interval)
+                continue
+
+            session = self.backend.Session()
+            try:
+                rows = (
+                    session.query(QueueMessage)
+                    .filter(QueueMessage.receiver_id == str(self.receiver_id))
+                    .order_by(QueueMessage.created_at.asc())
+                    .with_for_update(skip_locked=True)
+                    .limit(available_slots)
+                    .all()
+                )
+
+                # make plain jobs BEFORE deleting ORM instances
+                jobs = [
+                    {
+                        "id": r.id,
+                        "sender_id": r.sender_id,
+                        "receiver_id": r.receiver_id,
+                        "type": r.type,
+                        "payload": r.payload,
+                    }
+                    for r in rows
+                ]
+
+                for r in rows:
+                    session.delete(r)
+
+                session.commit()
+            finally:
+                session.close()
+
+
+            if not jobs:
+                await asyncio.sleep(self.poll_interval)
+                continue
+
+            for job in jobs:
+                if job["id"] in self._in_flight:
+                    continue
+                print("available")
+                self._in_flight.add(job["id"])
+                asyncio.create_task(self._run_executor_for_message(job))
+
+
+            await asyncio.sleep(self.poll_interval)
+
 
 if __name__ == "__main__":
     backend = Backend()
