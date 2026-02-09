@@ -6,7 +6,7 @@ from typing import Iterable, List, Set
 from sqlalchemy.orm import Session, sessionmaker
 
 from classes.entities import Base, PendingCharge
-from classes.google_helpers import create_session_factory
+from classes.GCConnection_hlpr import GCConnection
 
 
 class IdempotencyCache:
@@ -53,7 +53,7 @@ class IdempotencyCache:
         if not keys:
             return 0
 
-        sf = create_session_factory()
+        sf = GCConnection().build_db_session_factory()
         session = sf()
         try:
             rows: Iterable[tuple[str, str]] = (

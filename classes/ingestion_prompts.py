@@ -1,372 +1,3 @@
-# Here’s a clean, complete **host-side contract / checklist** that covers everything you mentioned (newlines, quotes, missing keys, and the “minimal doc” vs “full doc” workflow). I’m writing it as **host responsibilities**, not a model prompt.
-
-# ---
-
-# ## HOST PROCESSING CONTRACT (AUTHORITATIVE)
-
-# ### 0) Inputs & Modes
-
-# The host may run in two modes:
-
-# * **MIN mode**: model outputs only
-#   `<LABEL>:"status":"...","definition":"..."`
-# * **FULL mode**: model outputs the full delta-line shape
-#   `<LABEL>:"status":"...","definition":"...","open_items":"...","ask_log":"...","cancelled":false`
-
-# The host may also run a **relinking/enrichment pass** that appends fields such as `open_items`, `ask_log`, `cancelled`, and optionally `References`.
-
-# ---
-
-# ## 1) Pre-split Normalization (must happen before splitting into lines)
-
-# The host receives the model raw text output and performs these normalizations **before** splitting on newline characters to identify item lines.
-
-# ### 1.1 Normalize literal newlines inside quoted fields
-
-# * For any quoted string field (at minimum: `"definition":"..."`, and if present: `"open_items":"..."`, `"ask_log":"..."`):
-
-#   * Replace literal newline characters that occur *inside the quotes* with the two-character sequence `\n`.
-# * This preserves multi-line content while keeping “one physical line per item” parseable.
-
-# ### 1.2 Normalize tabs inside quoted fields (optional but recommended)
-
-# * Replace literal tab characters inside quoted strings with `\t`.
-
-# ### 1.3 Normalize line endings (recommended)
-
-# * Convert `\r\n` and `\r` to `\n` before doing step 1.1, so newline handling is consistent.
-
-# ---
-
-# ## 2) Quoting & Escaping Repair (host may auto-repair to keep parsing stable)
-
-# ### 2.1 Escape unescaped double quotes inside quoted string fields
-
-# For each quoted string field (especially `definition`):
-
-# * Any `"` character that appears *inside* the string content (i.e., not the closing delimiter) must be escaped as `\"`.
-
-# This is the exact issue you hit with: `mode="setup"`, `payment_status="paid"`, etc.
-
-# **Rule:** after host repair, the only unescaped `"` in a line should be the JSON-like delimiters around keys/values.
-
-# ### 2.2 Do not “semantic rewrite” unless you explicitly opt in
-
-# * Prefer escaping (`" -> \"`) over rewriting to single quotes (`'`), because rewriting changes content.
-# * If you do choose rewriting, do it only for patterns you trust and log it.
-
-# ---
-
-# ## 3) Line Identification & Parsing (only after normalization)
-
-# ### 3.1 Split into candidate lines
-
-# * Split the normalized text by `\n`.
-# * Ignore empty/whitespace-only lines.
-
-# ### 3.2 Parse each line as one item
-
-# Each line must parse into:
-
-# * `LABEL` (prefix before the first `:`)
-# * key/value pairs after it
-
-# If parsing fails:
-
-# * Mark the line invalid and surface it (don’t guess structure silently).
-
-# ---
-
-# ## 4) Schema Completion / Missing Keys (host enrichment)
-
-# Depending on your architecture, you can enforce either **MIN doc canonicalization** or **FULL doc canonicalization**.
-
-# ### 4.1 If you are storing a FULL document internally
-
-# For each parsed item, ensure the internal item record contains:
-
-# * `status`
-# * `definition`
-# * `open_items`
-# * `ask_log`
-# * `cancelled`
-
-# If the model output is MIN-shaped, the host fills defaults:
-
-# * `open_items = "[]"`
-# * `ask_log = "[]"` (or special ingestion override below)
-# * `cancelled = false`
-
-# ### 4.2 In ingestion mode only: overwrite ask_log deterministically
-
-# For every changed/created item in ingestion mode:
-
-# * Set `ask_log` to exactly:
-#   `[Ingested: translated from SOURCE_TEXT]`
-
-# If you want token savings in model output, you can allow the model to omit ask_log in MIN mode entirely, since the host overwrites anyway.
-
-# ---
-
-# ## 5) Reference Handling (optional “relinking pass”)
-
-# If you are doing the “minimal ledger first” approach, then later:
-
-# ### 5.1 References injection is host-owned (if you want it)
-
-# * In a separate pass, the host may append a `References:` segment into `definition` or store references separately.
-# * If you choose to append to `definition`, do it deterministically and consistently.
-
-# ### 5.2 Dependency graph derivation (only if you implement it)
-
-# * If you maintain dependencies, derive them only from references you control (not from random label mentions).
-# * If an item is `cancelled:true`, you may remove it from other items’ references automatically.
-
-# ---
-
-# ## 6) Output Canonicalization (if host emits back to model/verifier)
-
-# If you emit a doc back out:
-
-# ### 6.1 MIN output canonical form
-
-# Emit exactly:
-# `<LABEL>:"status":"...","definition":"..."`
-
-# ### 6.2 FULL output canonical form
-
-# Emit exactly:
-# `<LABEL>:"status":"...","definition":"...","open_items":"[]","ask_log":"[...]","cancelled":false`
-
-# (Where ask_log is overwritten in ingestion mode.)
-
-# ---
-
-# ## 7) Non-goals (what host must NOT “fix” silently)
-
-# Host normalization must **not** fabricate content:
-
-# * Do not create missing UC/API/ENT items (coverage is model responsibility or a separate extraction step).
-# * Do not remove forbidden business terms unless you explicitly design a policy scrubber (dangerous).
-# * Do not “correct” domain statements (subscriptions vs deposits) automatically.
-
-# Host fixes are **structural and escaping only**, unless you explicitly opt into semantic rewriting.
-
-# ---
-
-# If you want, I can also write this as a single compact “Host Spec” block you can paste into code comments, and/or give pseudocode for “escape quotes inside quoted field without touching delimiters” (the tricky part).
-
-
-
-BSS_SHARED_SCHEMA = """
-# Backbone Slot Schema (BSS) — Shared Schema (Mode-Agnostic)
-
-Purpose:
-- Define the document structure, item families, ID conventions, and definition formatting.
-- This schema is declarative. It contains no interview policy, no selection policy, and no prompting logic.
-
-## Document Model
-The document is a set of Items keyed by LABEL (unique ID). Each Item follows:
-
-<LABEL>: {
-  status: empty|partial|complete|waived,
-  definition: <string>,
-  open_items: <string>,
-  ask_log: <string>,
-  cancelled: true|false,
-  dependencies: <host-maintained>,
-  dependants: <host-maintained>
-}
-
-Responsibilities:
-- LLM maintains: status, definition, open_items, ask_log, cancelled.
-- Host maintains: dependencies, dependants (derived ONLY from Item labels appearing in the References segment inside definition).
-- If cancelled:true, host removes the cancelled Item label from other Items' References automatically.
-
-Status meanings:
-- empty: nothing captured.
-- partial: some captured but incomplete/ambiguous/insufficient for implementation.
-- complete: sufficiently specified to implement without guessing for this Item.
-- waived: intentionally not needed; include waiver reason in definition.
-
-## open_items and ask_log representation (mode-agnostic)
-
-open_items format:
-- A single string representing a bracketed list: [ ... ]
-- Each entry: OI-<n> <severity>: <missing fact or missing decision>
-- severity in {high|med|low}
-- OI-* tokens are allowed.
-- No Item labels (A1_*, UC-*, PROC-*, COMP-*, ROLE-*, UI-*, ENT-*, INT-*, API-*, NFR-*) inside open_items.
-
-ask_log format:
-- A single string representing a bracketed list: [ ... ]
-- Allowed entry prefixes: Ingested:, Q:, A:, Unprompted:
-- OI-* tokens are allowed.
-- No Item labels (A1_*, UC-*, PROC-*, COMP-*, ROLE-*, UI-*, ENT-*, INT-*, API-*, NFR-*) inside ask_log.
-
-## ID Naming Rules (LABELs)
-
-Fixed labels (always present):
-- A1_PROJECT_CANVAS
-- A2_TECHNOLOGICAL_INTEGRATIONS
-- A3_TECHNICAL_CONSTRAINTS
-- A4_ACCEPTANCE_CRITERIA
-
-Dynamic labels:
-- UC-<n>_<NAME>   (Use cases)
-- PROC-<n>_<NAME> (Processes)
-- COMP-<n>_<NAME> (Runtime components + datastores)
-- ROLE-<n>_<NAME> (Actors/roles)
-- UI-<n>_<NAME>   (Interaction surfaces)
-- ENT-<n>_<NAME>  (Entities/records)
-- INT-<n>_<NAME>  (Integrations/external systems)
-- API-<n>_<NAME>  (APIs/endpoints/webhook receivers)
-- NFR-<n>_<NAME>  (Non-functional requirements)
-
-Dynamic label slug rules:
-- <NAME> MUST match [A-Za-z0-9_]+ (letters/digits/underscore only; no spaces).
-- Keep <NAME> short and descriptive (2–5 words max, joined by underscores).
-
-ID hygiene rule:
-- Item labels MUST NOT appear anywhere in definition except inside the References segment.
-- Do not put Item labels in Definition/Flow/Contract/Outcomes/Decision/Notes/open_items/ask_log.
-
-## Definition Formatting Convention (GLOBAL)
-
-Each Item definition is a single string composed of short segments separated by " | ".
-
-Allowed segments:
-- Definition: ...          (always)
-- Flow: ...                (UC-* and PROC-* only)
-- Contract: ...            (ENT-*, API-*, INT-* when needed)
-- Snippets: ...            (any item when verbatim code/config/examples are needed)
-- Outcomes: ...            (externally observable outcomes; not test language)
-- Decision: ...            (explicit user choice only)
-- Notes: ...               (confirmed nuance only; short)
-- References: UseCases=[...] Processes=[...] Components=[...] Actors=[...] Entities=[...] Integrations=[...] APIs=[...] UI=[...] NFRs=[...]
-
-Global code containment rule:
-- Any code-like text (configs, schemas, protocols, file formats, command lines, code blocks, file-format directives) MUST appear only in Contract: or Snippets:.
-
-References segment rules:
-- Every Item definition MUST include exactly one References segment. Lists may be empty.
-- References segment MUST be the last segment in the definition string.
-- The References segment is the only place where Item labels may appear.
-- Host derives dependency graph only from Item labels inside References.
-- Include only direct, intentional references (one hop). Lists may be empty.
-
-Parsing constraint (GLOBAL):
-- Do not use curly braces '{' or '}' inside the Item definition except within Contract: or Snippets:.
-
-## Item Families (Responsibilities Only)
-
-[A] PROJECT OVERVIEW (fixed labels)
-
-A1_PROJECT_CANVAS
-- Definition should include:
-  - What is being built (plain language; not a feature list)
-  - Primary outcome(s) the system must enable
-  - System boundary: what the system owns vs what is explicitly external/pre-existing
-
-A2_TECHNOLOGICAL_INTEGRATIONS
-- Definition should include:
-  - Must-use platforms/technologies/libraries/services
-  - Build-vs-integrate boundaries (capabilities that must not be duplicated)
-  - If known: for each integration, what it provides/returns and the intended interaction style (high level)
-
-A3_TECHNICAL_CONSTRAINTS
-- Definition should include:
-  - Non-integration constraints that bound implementation (runtime, hosting, performance, reliability, compliance, etc.)
-  - If known: strictness (hard constraint vs preference)
-
-A4_ACCEPTANCE_CRITERIA
-- Definition should include:
-  - System-level externally observable outcomes
-  - Must-not/guardrails only when explicitly confirmed
-
-[B] USE CASES REGISTRY (UC-*)
-
-UC-<n>_<NAME>
-- Definition should include:
-  - Definition: short name + summary
-  - Flow: numbered main success path
-  - Notes: up to a few named alternatives/exceptions when explicitly described
-  - Outcomes: what must be true on success and key failure behavior (only when described)
-  - References: when this UC depends on other items (lists may be empty)
-
-[C] PROCESSES REGISTRY (PROC-*)
-
-PROC-<n>_<NAME>
-- Definition should include:
-  - Definition: internal orchestration summary
-  - Flow: numbered internal steps; each step names the human-readable component that performs the step (no Item labels)
-  - Outcomes: guarantees on completion (only confirmed)
-  - References: participating UCs/components/entities/integrations/APIs/UI when known and intentional (lists may be empty)
-
-[D] RUNTIME COMPONENTS REGISTRY (COMP-*)
-
-COMP-<n>_<NAME>
-- Definition should include:
-  - Definition: artifact name + responsibility summary
-  - Notes: kind (service/worker/job/client/datastore/adapter) if known; what it provides/owns/uses if confirmed
-  - Outcomes: what it must guarantee (only confirmed)
-  - References: integrations/entities/datastores/other components it depends on (only when known) (lists may be empty)
-
-[E] ACTORS REGISTRY (ROLE-*)
-
-ROLE-<n>_<NAME>
-- Definition should include:
-  - Definition: responsibilities/intent
-  - Notes: allowed actions/visibility boundaries only if explicitly stated
-  - References: UCs/processes where the role participates (when known) (lists may be empty)
-
-[F] UI INTERACTION REGISTRY (UI-*)
-
-UI-<n>_<NAME>
-- Definition should include:
-  - Definition: surface purpose
-  - Flow: key user actions → system action(s) invoked → feedback states (when described)
-  - Outcomes: what the user observes on success/failure (only confirmed)
-  - References: owner component + served UCs/APIs/processes when known (lists may be empty)
-
-[G] ENTITIES / DATA MODELS REGISTRY (ENT-*)
-
-ENT-<n>_<NAME>
-- Definition should include:
-  - Definition: what record represents
-  - Contract: key fields/invariants only when explicitly described or required by an explicit contract artifact
-  - Notes: system-of-record internal vs external (if known); lifecycle expectations when described
-  - References: owning component/datastore (if internal) or owning integration (if external) when known (lists may be empty)
-
-[H] INTEGRATIONS REGISTRY (INT-*)
-
-INT-<n>_<NAME>
-- Definition should include:
-  - Definition: what external system is used for
-  - Contract: protocol/transport/operations/auth only when explicitly described
-  - Notes: direction (inbound/outbound/bidirectional) if known
-  - Outcomes: what must be true for the integration to be considered working (only confirmed)
-  - References: owning component + related APIs/processes/entities when known (lists may be empty)
-
-[I] API REGISTRY (API-*)
-
-API-<n>_<NAME>
-- Definition should include:
-  - Definition: operation purpose (method/path or RPC name when explicitly described)
-  - Contract: key request/response fields only when explicitly described
-  - Outcomes: success/failure guarantees only when confirmed
-  - References: owner component + touched entities/integrations + served UCs/processes when known (lists may be empty)
-
-[J] NFR REGISTRY (NFR-*)
-
-NFR-<n>_<NAME>
-- Definition should include:
-  - Definition: category + constraint statement (only confirmed)
-  - Notes: measurable targets only if explicitly provided; otherwise capture as open items in mode rules
-  - Outcomes: operational truths that must hold (only confirmed)
-  - References: scoped components/surfaces/processes/use cases when known (lists may be empty)
-"""
-
 BSS_UC_EXTRACTOR_PROMPT = r"""
 You are UC_EXTRACTOR: a deterministic “use-case-from-narrative” extractor.
 
@@ -505,36 +136,89 @@ B) Canonicalization (hard rule)
 - Comparisons/sorting are case-insensitive; tie-break by Canonicalize(s) (original casing irrelevant)
 
 C) Label family semantics (hard rule)
-- UC-*: Use case cluster (end-to-end outcome-oriented chain of transitions).
-- ROLE-*: Human actor only; PRIMARY ACTOR (emits signals / initiates / decides) trough an UI-** gateway.
-- PROC-*: Internal orchestration flow; PRIMARY ACTOR (executes reactions / makes internal decisions / coordinates).
-- INT-*: External capability surface / outbound integration boundary owned by an external system.
-  - INT-* appears only as an Interaction point in Flow to an external actor we don't keep in our ledger.
-  - While systems are described as Primary Actor->Interaction Point->Primary Actor, the actor behint an INT-* integration point does not maintain an entity status in our document.
-  - This means that an interaction might  end with a single *-INT
-- COMP-*: Runtime execution substrate that hosts/executes parts or all our internal logic or persistence;
-  - It’s a *place the system runs* that imposes **lifecycle, scheduling, resource, or platform constraints** that the PRD depends on.
+
+- UC-*:
+  - Use case cluster: an end-to-end scenario from initiating trigger to externally visible outcome.
+  - Each UC-* is a cohesive chain of Initiator → Signal → Receiver → Reaction → Change, usually involving multiple ROLE-*, PROC-*, UI-*, API-*, INT-* and possibly COMP-*, ENT-*.
+
+- ROLE-*:
+  - Human actor only; PRIMARY ACTOR that initiates / decides by emitting signals through some UI-* gateway.
+  - ROLE-* appears only as an acting subject in Flow and in UC/ROLE ledgers; it is never a runtime substrate.
+  - Each ROLE-* should be connectable (via Flow or ledger) to:
+    - at least one UC-* it participates in, and
+    - at least one UI-* it uses.
+
+- PROC-*:
+  - Internal orchestration flow; PRIMARY ACTOR inside the system that executes reactions, makes internal decisions, and coordinates work to realize one or more UC-*.
+  - PROC-* appears as an acting subject in Flow; it is never a runtime substrate by itself.
+  - When SOURCE_TEXT names or strongly implies a host runtime (“webserver”, “worker”, “mobile app process”, etc.), the responsibilities ledger MUST record that PROC-* “runs on COMP-*”.
+  - By design each PROC-* is intended to:
+    - run on exactly one COMP-* host, and
+    - list the UI-*, API-*, INT-*, ENT-* it directly uses.
+  - Do NOT create PROC-* for external systems; those are always expressed via INT-* + (optionally) API-* boundaries we own.
+
+- INT-*:
+  - External capability surface / outbound integration boundary owned by an external system.
+  - INT-* appears only as an interaction point in Flow (a locus where a PROC-* calls out to an external system); the external system behind it is not a first-class actor in our ledger.
+  - It is allowed for an interaction chain to end on INT-* (Primary Actor → … → INT-*).
+  - INT-* is never hosted on a COMP-* we own but, the interaction with it is implemented by at least one PROC-* (the internal process that uses/handles that integration); UC_EXTRACTOR records this only when SOURCE_TEXT makes it clear and otherwise leaves it as a gap (no invention of owners).
+
+- COMP-*:
+  - Runtime execution substrate that hosts/executes parts or all of our internal logic or persistence.
+  - It is a place the system runs that imposes lifecycle, scheduling, resource, platform, or storage constraints that the PRD depends on.
   - Include explicitly named platforms/runtimes/OS/process runners/game runtimes/databases or storage facilities not only when PRD constrains them BUT when it strongly implies strong execution-boundary evidence.
-  - COMP-* MUST NOT be described as the decider/initiator; it is hosting/substrate.
-  Mint a `COMP-*` only when `SOURCE_TEXT` **names or strongly implies** at least one of these:
-    - **Distinct host boundary**: separate process/service/worker/runtime environment (deployable unit).
-    - **Distinct lifecycle**: start/stop, crash/freeze, clean shutdown, restart semantics tied to the host.
-    - **Platform/OS constraint**: “PlayStation runtime,” “Android,” “browser,” “Unity runtime,” “robot controller,” etc.
-    - **Explicit placement**: “runs on the webhook worker,” “hosted on the server,” “client app does X.”
-  Do **not** mint separate `COMP-*` for:
-    - **Libraries/frameworks** used *inside the same process*.
-    - **Modules/components** that are purely logical subdivisions (rendering module, AI module).
-    - **External systems** (those are `INT-*`, not `COMP-*`).
-- ENT-*: Internal record/entity whose state is changed/queried by the system (only if PRD implies durable state). ENT-* implies durable storage: In Memory only structures do not apply.
-- UI-*: Internal interaction gateway (interaction carrier) that allows *a user* to trigger/observe system behavior.
-  - UI-* is an artifact independent of which COMP-* hosts it (client app, server-rendered UI, etc.).
-  - UI-* MUST NOT be used for external/third-party hosted surfaces (those are INT-*) or other processes (PROC-*).
-- API-*: Internal programmatic boundary we own (endpoint, webhook receiver, RPC operation) hosted by an internal secondary actor that would be used for intra COMP-* communication or inbound integration with external systems (webhooks)
-  - In a similar manner as INT-* that can be the the final point of a single transaction that ends in an integration with an internal system, API-* can be the initiator of a chain of transactions started from outside.
-- NFR-*: Non-functional requirement / constraint clause explicitly stated by SOURCE_TEXT.
+  - Mint a COMP-* only when SOURCE_TEXT names or strongly implies at least one of:
+    - Distinct host boundary: separate process / service / worker / runtime environment (deployable unit).
+    - Distinct lifecycle: start/stop, crash/freeze, clean shutdown, restart semantics tied to the host.
+    - Platform/OS constraint: “PlayStation runtime”, “Android app”, “browser SPA”, “Unity runtime”, “robot controller”, etc.
+    - Explicit placement: “runs on the webhook worker”, “hosted on the server”, “mobile client does X”.
+  - Do NOT mint separate COMP-* for:
+    - libraries/frameworks used inside the same process,
+    - modules/components that are purely logical subdivisions (rendering module, AI module),
+    - external systems (those are represented via INT-*, not COMP-*).
+  - COMP-* MUST NOT be described as the decider/initiator in Flow; it is a secondary actor (substrate/host) only.
+  - When SOURCE_TEXT makes it clear, the responsibilities ledger of a COMP-* should list:
+    - the PROC-* and API-* running on it,
+    - the ENT-* it hosts (e.g. as a datastore),
+    - the UI-* it serves / delivers.
+
+- ENT-*:
+  - Data records/entities whose state is changed and/or queried by the system, only when SOURCE_TEXT implies durable state or the data structure being a mandatory contract for communitation across runtimes (eg: the contract interface of a web service, a file, yaml, JSON, xml format, a database record in a table)
+  - ENT-* implies some durable storage or contractual obbligation between different runtimes: **in-memory/in-process only data structures** might belong to the treatment of the internals of a PROC-*, UI-* item, but **do NOT qualify to be abstracted into separate ENT-* records**.
+  - ENT-* is a data concept: a contract or a data structure. It is never an acting subject and it never appears as an actor in Flow, just as a object complement.
+  - Where SOURCE_TEXT constrains it, the responsibilities ledger should mention which COMP-* (usually a datastore) persists the ENT-* and what API-*, INT-*, PROC-*, UI-* make use of it.
+  - Do NOT create separate ENT-* for single fields/columns; attach fields to the most relevant existing entity or leave a gap when ownership is unclear.
+
+- UI-*:
+  - Internal interaction gateway (interaction carrier) that allows a ROLE-* to trigger/observe system behavior.
+  - UI-* is an artifact independent of which COMP-* hosts it (client app, server-rendered UI, desktop app, etc.).
+  - UI-* MUST NOT be used for external / third-party hosted surfaces (those are INT-*) or for process-level boundaries (those are PROC-* / API-*).
+  - UI-* appears in Flow as the carrier for human actions, for feedback surfaces (success, error, loading, state changes) and other information that is displayed to the user in order for him to take an informed decision and appropriate action.
+  - For each UI-* that appears, UC_EXTRACTOR should, when SOURCE_TEXT allows, tie it to:
+    - at least one ROLE-* that uses it,
+    - at least one UC-* it participates in,
+    - the API-* / PROC-* that are triggered or observed through it,
+    - and, if named, the COMP-* that serves/hosts it.
+    If any of these are not clearly stated, keep the missing links as gaps in Notes rather than inventing surfaces or connections.
+
+- API-*:
+  - Internal programmatic boundary we own: endpoints, webhook receivers, RPC operations exposed by a COMP-* we operate.
+  - API-* can serve both:
+    - inbound integrations (external systems calling us, e.g. webhooks), and
+    - internal or UI clients (e.g. browser/mobile calling our HTTP APIs).
+  - API-* appears in Flow as a carrier between callers (UI-* or external systems) and PROC-*.
+  - API-* is always hosted on some COMP-* and implemented by one PROC-*, consumed by at least one PROC-* or UI-* or external system.
+    - When SOURCE_TEXT makes host or handler explicit (“/checkout endpoint on the webserver handled by checkout service”), record those relationships in the responsibilities ledger.
+    - When consumers are named (UI-* or “Stripe webhook infrastructure”), record that consumption as well.
+    - UC_EXTRACTOR MUST NOT invent paths, hosts, or consumers; absent evidence, leave gaps to be filled later.
+
+- NFR-*:
+  - Non-functional requirement / constraint clause explicitly stated by SOURCE_TEXT (e.g. security, privacy, performance, availability, observability, residency).
   - NFR-* is NOT an actor and does NOT appear in Primary actors / Secondary actors.
-  - NFR-* is attached to UC blocks as a constraint reference (see Output Format).
-  - Do NOT “invent” NFRs; only collect explicit constraint clauses.
+  - NFR-* is attached to UC blocks as a constraint reference and may also reference specific PROC-*, COMP-*, UI-*, API-*, INT-*, ENT-* that it shapes.
+  - Do NOT invent NFR-*; only collect explicit constraint clauses.
+  - When an NFR-* clearly targets specific items (e.g. “no double-charge for checkout”, “must work offline on mobile”), the responsibilities ledger for that NFR-* should name those items so later passes can synthesize A3_TECHNICAL_CONSTRAINTS and A4_ACCEPTANCE_CRITERIA from it.
+
 
 - You MUST NOT create PROC-* or COMP-* for an external system.
   - External system like Stripe, payment gateway, robot sensor module ARE System we describe only through the interaction we have with them either Inbound (API-*) or Outbound (INT-*) but are not actors rappresented in our ledger
@@ -740,7 +424,7 @@ The waiting page will read the payment state of the Cart being processed and dep
 Let's translate this in terms of labels:
 
 "The ROLE-1_User clicks buy on the UI-1_Cart_Panel.
-The PROC-1_Redirect_To_STripe_on_buy that lives on COMP-1_Webserver sets the current user cart ENT-1_User_Cart status field to "checkout", calculates the total, will ask Stripe for an intention_id record value using INT-5_Stripe_PaymentIntent_Create and attached to the corresponding intention_id field in the  ENT-1_User_Cart.
+The PROC-1_Redirect_To_Stripe_on_buy that lives on COMP-1_Webserver sets the current user cart ENT-1_User_Cart status field to "checkout", calculates the total, will ask Stripe for an intention_id record value using INT-5_Stripe_PaymentIntent_Create and attached to the corresponding intention_id field in the  ENT-1_User_Cart.
 It will use the INT-1_Stripe_Hosted_Form_URL endpoint to elaborate the URL to send the browser to the stripe hosted Form, operation that will be performed by the UI-1_Cart_Panel.
 Once the payment is performed Stripe redirects the user back to the website  on a page UI-2_Checkout_Waiting_Room that will poll for the status field of the ENT-1_User_Cart to be get in a final state using the API-1_Internal_Cart_Status.
 In the meanwhile our webhook worker PROC-2_Webhook_worker that lives in the COMP-2_Webhook_Processor will receive notification from Stripe trough the API-2_Stripe_Webhook_Endpoint that the payment happened with some metadata that will identify the current user cart ENT-1_User_Cart and modify the status field object as "paid" or "not paid" (final states)
@@ -828,6 +512,837 @@ SOURCE_TEXT:
 """
 
 
+
+
+
+
+
+
+
+
+
+
+BSS_CANONICALIZER_PROMPT = r"""
+You are a canonizer for one BSS label family (TYPE ∈ {ROLE, PROC, COMP, ENT, API, UI, INT, NFR}).
+
+## Goal:
+Given:
+- SOURCE_TEXT: an original PRD narrative.
+- Epistemic-1: basic rules for identifying UC/ROLE/PROC/COMP/ENT/UI/API/INT/NFR labels within SOURCE_TEXT
+
+You are gonna extrapolate/formalize the definitions for the items of a specific family contained in the SOURCE_TEXT.
+
+To do that you will be given:
+- UC_BLOCKS: a list of draft UC-* definitions produced under Epistemic-1 (including flows + responsibilities + notes) and related to the ITEMS_OF_FAMILY items that will need to be canonicalized according to Epistemic-2.
+- ITEMS_OF_FAMILY: a list of Epistemic-1 labels/responsabilities belonging to the specific family of items we need to extract from SOURCE_TEXT in the form of Epistemic-2 definitions.
+- RELATED_ITEMS: a list of labels/responsibility snippets for items related to ITEMS_OF_FAMILY canonicalized as Epistemic-1 definitions.
+- CURRENT_BSS_CONTEXT: a list of already canonicalized Epistemic-2 assets related to the current ITEMS_OF_FAMILY as accumulated during previous passes.
+- Epistemic-2: the epistemic to follow for the extraction of canonical definitions out of the tracks provided by ITEMS_OF_FAMILY items.
+
+## Produce:
+Epistemic-2 canonical definitions for each Item in ITEMS_OF_FAMILY, without changing any labels or creating new ones.
+
+Raccomendations:
+- Natural language isn’t “dirty structured data.” It’s a compressed representation of intent + uncertainty + emphasis + omission. Treating it as if its only job is to be normalized into a schema destroys meaning.
+- The most important thing to preserve is the epistemic status of each claim, not to crush it.
+- Humans write with gaps: those gaps are not errors to “repair”; they’re often the actual requirements surface: what’s missing is part of what needs to be discovered later.
+- A good formalization keeps the same narrative topology: the same causal story, just with labels. If the story changes, it’s not “structuring,” it’s rewriting.
+- “Deduction” here means: minimal commitments that are forced by the text (e.g., “buy implies some success path exists”), not “complete the system as I would design it.”
+- Over-atomization is a failure mode: splitting into micro-transitions can create illusory precision while losing the actual end-to-end outcome the human meant.
+
+----------------------------------------
+SOURCE_TEXT
+----------------------------------------
+`````
+{prd}
+`````
+
+----------------------------------------
+Epistemic-1 Label family semantics
+----------------------------------------
+
+- UC-*:
+  - Use case cluster: an end-to-end scenario from initiating trigger to externally visible outcome.
+  - Each UC-* is a cohesive chain of Initiator → Signal → Receiver → Reaction → Change, usually involving multiple ROLE-*, PROC-*, UI-*, API-*, INT-* and possibly COMP-*, ENT-*.
+
+- ROLE-*:
+  - Human actor only; PRIMARY ACTOR that initiates / decides by emitting signals through some UI-* gateway.
+  - ROLE-* appears only as an acting subject in Flow and in UC/ROLE ledgers; it is never a runtime substrate.
+  - Each ROLE-* should be connectable (via Flow or ledger) to:
+    - at least one UC-* it participates in, and
+    - at least one UI-* it uses.
+
+- PROC-*:
+  - Internal orchestration flow; PRIMARY ACTOR inside the system that executes reactions, makes internal decisions, and coordinates work to realize one or more UC-*.
+  - PROC-* appears as an acting subject in Flow; it is never a runtime substrate by itself.
+  - When SOURCE_TEXT names or strongly implies a host runtime (“webserver”, “worker”, “mobile app process”, etc.), the responsibilities ledger MUST record that PROC-* “runs on COMP-*”.
+  - By design each PROC-* is intended to:
+    - run on exactly one COMP-* host, and
+    - list the UI-*, API-*, INT-*, ENT-* it directly uses.
+  - Do NOT create PROC-* for external systems; those are always expressed via INT-* + (optionally) API-* boundaries we own.
+
+- INT-*:
+  - External capability surface / outbound integration boundary owned by an external system.
+  - INT-* appears only as an interaction point in Flow (a locus where a PROC-* calls out to an external system); the external system behind it is not a first-class actor in our ledger.
+  - It is allowed for an interaction chain to end on INT-* (Primary Actor → … → INT-*).
+  - INT-* is never hosted on a COMP-* we own but, the interaction with it is implemented by at least one PROC-* (the internal process that uses/handles that integration); UC_EXTRACTOR records this only when SOURCE_TEXT makes it clear and otherwise leaves it as a gap (no invention of owners).
+
+- COMP-*:
+  - Runtime execution substrate that hosts/executes parts or all of our internal logic or persistence.
+  - It is a place the system runs that imposes lifecycle, scheduling, resource, platform, or storage constraints that the PRD depends on.
+  - Include explicitly named platforms/runtimes/OS/process runners/game runtimes/databases or storage facilities not only when PRD constrains them BUT when it strongly implies strong execution-boundary evidence.
+  - Mint a COMP-* only when SOURCE_TEXT names or strongly implies at least one of:
+    - Distinct host boundary: separate process / service / worker / runtime environment (deployable unit).
+    - Distinct lifecycle: start/stop, crash/freeze, clean shutdown, restart semantics tied to the host.
+    - Platform/OS constraint: “PlayStation runtime”, “Android app”, “browser SPA”, “Unity runtime”, “robot controller”, etc.
+    - Explicit placement: “runs on the webhook worker”, “hosted on the server”, “mobile client does X”.
+  - Do NOT mint separate COMP-* for:
+    - libraries/frameworks used inside the same process,
+    - modules/components that are purely logical subdivisions (rendering module, AI module),
+    - external systems (those are represented via INT-*, not COMP-*).
+  - COMP-* MUST NOT be described as the decider/initiator in Flow; it is a secondary actor (substrate/host) only.
+  - When SOURCE_TEXT makes it clear, the responsibilities ledger of a COMP-* should list:
+    - the PROC-* and API-* running on it,
+    - the ENT-* it hosts (e.g. as a datastore),
+    - the UI-* it serves / delivers.
+
+- ENT-*:
+  - Internal record/entity whose state is changed and/or queried by the system, only when SOURCE_TEXT implies durable state.
+  - ENT-* implies durable storage: in-memory-only structures do NOT qualify.
+  - ENT-* is a data concept, not an acting subject; it never appears as an actor in Flow.
+  - Where SOURCE_TEXT constrains it, the responsibilities ledger should mention which COMP-* (usually a datastore component) persists the ENT-*.
+  - Do NOT create separate ENT-* for single fields/columns; attach fields to the most relevant existing entity or leave a gap when ownership is unclear.
+
+- UI-*:
+  - Internal interaction gateway (interaction carrier) that allows a ROLE-* to trigger/observe system behavior.
+  - UI-* is an artifact independent of which COMP-* hosts it (client app, server-rendered UI, desktop app, etc.).
+  - UI-* MUST NOT be used for external / third-party hosted surfaces (those are INT-*) or for process-level boundaries (those are PROC-* / API-*).
+  - UI-* appears in Flow as the carrier for human actions, for feedback surfaces (success, error, loading, state changes) and other information that is displayed to the user in order for him to take an informed decision and appropriate action.
+  - For each UI-* that appears, UC_EXTRACTOR should, when SOURCE_TEXT allows, tie it to:
+    - at least one ROLE-* that uses it,
+    - at least one UC-* it participates in,
+    - the API-* / PROC-* that are triggered or observed through it,
+    - and, if named, the COMP-* that serves/hosts it.
+    If any of these are not clearly stated, keep the missing links as gaps in Notes rather than inventing surfaces or connections.
+
+- API-*:
+  - Internal programmatic boundary we own: endpoints, webhook receivers, RPC operations exposed by a COMP-* we operate.
+  - API-* can serve both:
+    - inbound integrations (external systems calling us, e.g. webhooks), and
+    - internal or UI clients (e.g. browser/mobile calling our HTTP APIs).
+  - API-* appears in Flow as a carrier between callers (UI-* or external systems) and PROC-*.
+  - API-* is always hosted on some COMP-* and implemented by one PROC-*, consumed by at least one PROC-* or UI-* or external system.
+    - When SOURCE_TEXT makes host or handler explicit (“/checkout endpoint on the webserver handled by checkout service”), record those relationships in the responsibilities ledger.
+    - When consumers are named (UI-* or “Stripe webhook infrastructure”), record that consumption as well.
+    - UC_EXTRACTOR MUST NOT invent paths, hosts, or consumers; absent evidence, leave gaps to be filled later.
+
+- NFR-*:
+  - Non-functional requirement / constraint clause explicitly stated by SOURCE_TEXT (e.g. security, privacy, performance, availability, observability, residency).
+  - NFR-* is NOT an actor and does NOT appear in Primary actors / Secondary actors.
+  - NFR-* is attached to UC blocks as a constraint reference and may also reference specific PROC-*, COMP-*, UI-*, API-*, INT-*, ENT-* that it shapes.
+  - Do NOT invent NFR-*; only collect explicit constraint clauses.
+  - When an NFR-* clearly targets specific items (e.g. “no double-charge for checkout”, “must work offline on mobile”), the responsibilities ledger for that NFR-* should name those items so later passes can synthesize A3_TECHNICAL_CONSTRAINTS and A4_ACCEPTANCE_CRITERIA from it.
+
+
+- You MUST NOT create PROC-* or COMP-* for an external system.
+  - External system like Stripe, payment gateway, robot sensor module ARE System we describe only through the interaction we have with them either Inbound (API-*) or Outbound (INT-*) but are not actors rappresented in our ledger
+- External UI surfaces are NOT UI-*.
+  - If the interaction surface is hosted/owned by an external system (e.g., Stripe hosted checkout page, vendor console, third-party device UI),
+    represent it as INT-* (a capability surface of that external boundary), not as UI-*.
+- If SOURCE_TEXT implies multiple distinct external interaction surfaces for the same vendor/system, mint multiple INT-* items, each named as:
+  INT-*_Vendor_<CapabilitySurface>
+  Examples: INT-*_Stripe_Payment_Intents, INT-*_Stripe_Hosted_Checkout_Form, INT-*_Stripe_Webhook_Event_Source
+
+
+----------------------------------------
+UC_BLOCKS
+----------------------------------------
+{uc_blocks}
+
+----------------------------------------
+ITEMS_OF_FAMILY
+----------------------------------------
+{items_of_family}
+
+----------------------------------------
+RELATED_ITEMS
+----------------------------------------
+{related_items}
+
+----------------------------------------
+CURRENT_BSS_CONTEXT
+----------------------------------------
+{bss_context}
+
+----------------------------------------
+Epistemic Stance
+----------------------------------------
+## 1. Narrative & Epistemic Discipline
+
+- SOURCE_TEXT stores only user-confirmed facts and explicit decisions (“cold data”).
+- Missing, unclear, or contested points → `open_items` gaps only (never phrased as facts).
+- Suggestions, notable facts, defaults  → allowed only in `open_items` never stored as facts.
+- Clear declarative statements → facts in the relevant items.
+- Statements with uncertainty or multiple materially different interpretations → a gap plus a targeted disambiguation question.
+- Treat conflicting/uncertain/multi-interpretation statements as gaps on the correct item, and ask a single targeted disambiguation question instead of generic confirmations.
+- Be **greedy with evidence**:
+  - use the isolated definitions of UC_BLOCKS and RELATED_ITEMS to scan the entire SOURCE_TEXT for clues around the final definition of each item in ITEMS_OF_FAMILY,
+  - For each such clue, introduce or update the corresponding conceptual items the final item definition is composed by.
+
+- Be **stingy with invention**:
+  - Do **not** introduce new items from domain labels alone (“e-commerce”, “CRM”, “game”, etc.) or from vague “capability” statements without a concrete scenario derived from SOURCE_TEXT.
+  - Never infer or invent permissions, prohibitions, role privileges, or “must not” conditions.
+  - Do not add default security/privacy patterns (least privilege, admin elevation, etc.) unless the user explicitly states them.
+  - **Never “repair” gaps by guessing mechanisms, defaults, flows, or structures; keep them visible as gaps until the user fills or waives them.**
+
+## 2. `open_items`
+
+In addition to each segment allowed in the conceptual content of each item, you can introduce a single `open_items` segment per item.
+An `open_items` segment:
+
+- Contains semi-colon `;` separated lists of gaps (missing facts, undecided choices, contradictions, and “notes to user” for that item).
+- Phrases such as `"Missing:"`, `"TBD"`, `"unknown"`, `"need to decide"`, `"open question"` are allowed only inside `open_items`.
+- Always visible to the user but not directly edited by them.
+- You may modify it only when `status` is `draft` or `partial`.
+- Is Part of the guidance you must follow toward formulating NEXT_QUESTION
+
+-Your job is to:
+  - Decide which gaps exist or are resolved, decide how severe they are and which item they belong to.
+  - Communicate these decisions in `open_items` for items with status = `draft|partial`. `complete|waived` are read only
+
+Each gap must be prefixed with a label for severity (high|med|low), use the following table to decide the severity of each gap depending on the item type.
+User emphasis can raise or lower severity.
+
+Use `high` when a missing fact blocks understanding the trigger, actor, main outcome or ownership of a critical implementation/record/API/integration.
+eg:
+- Is unclear on which COMP-* runs a PROC-*;
+- Unclear permission boundary when sensitive actions can be performed on explicitely marked sensitive data.
+- Missing even high-level integration mechanism; unclear direction (who calls whom) when it affects flows formalization.
+- Missing key UI-* surfaces for critical system actions that must be performed by a user;
+- Missing API-*, INT-* to perform an  operation
+- Unclear whether a component owns a critical record, surface, API
+- unclear purpose of the endpoint; missing main request or response shape for a critical operation.
+- missing key fields or states that drive behavior;
+
+Use `med` when it changes behavior but not core feasibility.
+eg:
+- missing validation or feedback that affects behavior
+- missing auth style or error semantics that influence how we handle failures.
+- unclear what user sees on success/failure for a critical flow.
+- unclear lifecycle transitions that affect flows.
+
+Use low for nuance/stylistic/secondary details.
+- unclarified hard constraints on hosting, residency, or compliance that could invalidate an architecture; missing target class for performance/availability (e.g. “needs to feel realtime” vs “batch is fine”); specific tuning numbers (e.g. exact latency thresholds, batch sizes) when the class of constraint is already known.
+- choice between similar providers when it does not change behavior; endpoint path/field naming cosmetics.
+- labels, titles, visual styling, layout choices, iconography or descriptive nuance that do not change what the role can do/see.
+- purely presentational fields; optional metadata that does not affect behavior.
+- exact tuning numbers or tooling preferences when the constraint class is already clear.
+
+## 3. Segments
+
+In addition to `open_items` each item is composed of separated segments depending on the item family:
+- Think in terms of the **information** that should exist for each item in terms of type
+
+Segments:
+- definition: short summary/description
+- flow: main and alternative/exception flows,
+- contract: key fields/contracts,
+- snippets: code/pseudocode snippets,
+- notes: contextual notes or extended definition
+- kind: used only for Comps, defines the kind of runtime surface (service/worker/job/client/datastore/adapter)
+
+**ONLY THE SEGMENTS WITHIN THIS GROUP SPECIFIED in THE Epistemic-2 format rules are allowed for output**
+** You are not allowed to create custom segments in your output**
+**You are not allowed to use segments not enumerated in the Epistemic-2 format rules
+
+Each segment:
+- Must contain only Confirmed facts and decisions (vs `open_items` that contains only unconfirmed info)
+- `snippets`, `contract` contain Code-like artifacts (schemas, payloads, SQL, protocol messages, code, pseudocode, formats): greedly collect thys type of information when provided by SOURCE_TEXT
+
+## 4. Language and Delta Behavior
+The final content you will provide has to be an incremental extension of the current CURRENT_BSS_CONTEXT.
+Treating each newly emitted Epistemic-2 definition as a standalone mini-spec and ignoring CURRENT_BSS_CONTEXT has to be considered as a failure.
+  - Your job is **not** to retell the whole story for each item but to emit the **minimal set of changes and addition** required to make the newly emitted Epistemic-2 ITEMS_OF_FAMILY definition consistent and complete **inside the existing BSS graph**.
+
+Concretely:
+- Treat CURRENT_BSS_CONTEXT as the in-progress graph your output for ITEMS_OF_FAMILY accrues upon.
+- Do not rephrase or restate flows, note or definitions that are already captured in CURRENT_BSS_CONTEXT but build/references upon them.
+- When defining an item in ITEMS_OF_FAMILY:
+  - Align with the UC_BLOCKS story as already encoded in CURRENT_BSS_CONTEXT.
+  - Avoid “fresh narrations” that duplicate existing flows in different words.
+
+Use detailed but concise, highly technical, LLM-readable language.
+Definitions must be globally consistent with CURRENT_BSS_CONTEXT while staying locally precise for each ITEM_OF_FAMILY.
+
+## 5. User Provided Data structures and code snippets
+User Provided Data structures and code snippets provided in SOURCE_TEXT are **FIRST GRADE** information and as such **MUST** find their way inside the document with no exception.
+Even when not complete they must be **NOT** treated as “just prose examples” but as a far more binding narrative.
+This includes:
+- Code (functions, classes, pseudocode, SQL, etc.).
+- Data schemas and record layouts.
+- File / message / protocol examples/formats (e.g. .cub maps, JSON bodies, CLI examples).
+- Any fenced or preformatted text that constrains how data is shaped on the wire or on disk.
+
+Their primary location is within `contract` or `snippet` segments (when provided in the Epistemic-2 format for the current ITEMS_OF_FAMILY items) but the location is not mandatory:
+Depending what they describe or what they provide and the relatiosnhip with the different ITEMS_OF_FAMILY to be emitted, is your task to recognize where they should be located and how they should be treated/interpreted.
+**NEVERTELESS THEIR TREATMENT AND INTERPRETATION MUST START FROM A VERBATIM REPRODUCTION OF THE ORIGINAL** explaining how and why any treatment and interpretation conclusion was reached from the original verbatim form.
+**You are prohibithed to introduce normalized forms or any sort of treatment before/without the original being embedded in the document either as part of the CURRENT_BSS_CONTEXT or the new context you are going to provide with the Epistemic-2 items you are going to produce**
+
+----------------------------------------
+Epistemic-2 format rules for the current ITEMS_OF_FAMILY items
+----------------------------------------
+The following formats/rules are mandatory for the rendition of the rendition of ITEMS_OF_FAMILY in the Epistemic-2 format.
+Even when they would make a rendition more semantically descriptive **You are forbidden to change these rules(eg: by introducing new segments in the "conceptual content")**
+
+{epistemic_2}
+
+
+"""
+
+
+epistemic_2_rules = {
+  "PROC":"""
+
+### PROC-* Processes (~Emergent; Required when UCs need orchestration)
+
+- Essence: An internal workflow/behavior the sw system must implement to realize one or more use cases.
+- Minimum conceptual content:
+  - `definition`: short description of what the process is responsible for (trigger → input → outcome).
+  - `flow`: numbered internal steps, each naming
+
+    - which runtime component/process acts upon which trigger,
+    - what it calls/consumes (UI/API/INT/entity),
+    - what state change/effect/message it produces.
+  - `snippets`: any code/pseudocode the user gives or asks for that belongs to this orchestration.
+  - `notes`: responsibilities, invariants, and behavioral constraints of this workflow (not generic platform rules).
+
+- Examples w output format:
+````
+:::[PROC-1_Redirect_To_Stripe_on_buy]
+
+- [definition]:
+Server-side process that takes a pending ENT-1_User_Cart, turns it into an active Stripe checkout session, and returns a redirect target for ROLE-1_User.
+
+- [flow]:
+PROC-1_Redirect_To_Stripe_on_buy receives a checkout request from API-1_Checkout for a specific ENT-1_User_Cart.
+It verifies that the cart belongs to ROLE-1_User and is in a state that can be checked out, computes the total amount, and sets the cart status to `checkout`.
+It then calls INT-1_Stripe_Hosted_Form to create a Stripe Checkout Session, stores the returned identifiers on ENT-1_User_Cart, and returns the Stripe redirect URL back to API-1_Checkout so UI-1_Cart_Panel can redirect the browser.”
+
+- [snippets]:
+```
+import stripe
+
+stripe.api_key = "sk_test_..."  # from config
+
+def Stripe_Hosted_Form_create_session(
+    *, stripe_customer_id: str, cart_id: str, total_amount_minor: int,
+    currency: str, success_url: str, cancel_url: str
+) -> tuple[str, str, str | None]:
+    metadata = {"cart_id": cart_id}
+
+    session = stripe.checkout.Session.create(
+        ...
+    )
+
+    return session.id, session.url, getattr(session, "payment_intent", None)
+```
+
+- [notes]:
+PROC-1_Redirect_To_Stripe_on_buy does not decide payment success or failure; it only prepares checkout and hands control to Stripe.
+
+:::[PROC-2_Webhook_worker]
+
+- [definition]:
+Background process that consumes Stripe events from INT-2_Stripe_Webhooks and applies them to ENT-1_User_Cart and related payment entities.
+
+- [flow]:
+“PROC-2_Webhook_worker is fed by API-3_Stripe_Webhook_Endpoint, which persists incoming Stripe events as ENT-2_Stripe_Messages_Cache.
+At each run, PROC-2_Webhook_worker reads unprocessed entries from ENT-2_Stripe_Messages_Cache, interprets them by type and metadata, and routes them to the appropriate payment handlers, for example:
+• events of type `checkout.session.completed` with `mode = "payment"` go to PROC-10_ConsumptionService_confirm_deposit_session;
+• `payment_intent.succeeded` with `metadata.type == "consumption_direct_card"` go to PROC-11_ConsumptionService_confirm_direct_card_charge;
+• `payment_intent.payment_failed` with `metadata.type == "consumption_direct_card"` go to PROC-12_ConsumptionService_handle_direct_card_failure.
+After successful processing, PROC-2_Webhook_worker marks the corresponding ENT-2_Stripe_Messages_Cache rows as processed so they are not handled again.”
+
+- [notes]:
+Idempotency and no-double-charge behavior for UC-1_Cart_Checkout depend heavily on PROC-2_Webhook_worker correctly routing and de-duplicating Stripe events.
+
+- [open_items]:
+high: define retry/backoff policy when downstream PROC-10/PROC-11/PROC-12 fail while processing an event; low: decide whether ordering constraints between different event types (e.g. `payment_intent.*` vs `checkout.session.completed`) must be enforced; think about how to safely reprocess ENT-2_Stripe_Messages_Cache for backfills or bug fixes"
+
+````
+
+- Key rules:
+  - Each PROC-* **MUST** specify on what COMP-* is running (CRITICAL) and any API-* it interacts with.
+  - By finalization, each PROC-* should mention the INT-*, API-*, UI-* surfaces and entities it actually uses/runs/implements/interacts with.
+  - Do **not** create separate PROC-* items merely because there are alternative paths (success vs failure vs compensation) inside the same workflow; model those as flow branches within a single process unless the user clearly separates them.
+
+  """,
+  "COMP":"""
+
+### COMP-* Components (~Emergent; runtime coordinate system, center of gravity B)
+
+- Essence:
+  - Concrete runtime artifacts we operate(services, workers, jobs, clients, adapters, datastores) that host processes, surfaces, integrations, and data.
+- COMP-* is the primary runtime coordinate system: conceptually treat its `References` as the main place where ownership and usage edges are expressed. Other items may also reference their owners; the host still treats all edges symmetrically when building the graph.
+- One of the main objectives of this process is to create a list of COMP-* detailing all the PROC-* and API-* running on them, all the ENT-* they host, all the UI-* they serve.
+- Minimum content:
+  - `definition`: what this runtime artifact is, its main responsibility, what classes of work it performs.
+  - `kind`: one of `service / worker / job / client / datastore / adapter`.
+  - `notes`:
+    * all the PROC-* and API-* running on this item, all the ENT-* it hosts, all the UI-* it serves.
+    * any important runtime boundaries (e.g. “public-facing HTTP service”, “batch worker processing queue X”).
+- Examples w output format:
+````
+
+:::[COMP-1_Webserver]
+
+- [Kind]:
+service
+
+- [definition]:
+HTTP service that serves user-facing pages and exposes the main application APIs.
+
+- [notes]:
+COMP-1_Webserver hosts UI-1_Cart_Panel, UI-2_Checkout_Waiting_Room, and UI-3_Payment_Successful, and exposes API-1_Checkout and API-2_Internal_Cart_Status. It collaborates with COMP-3_Webhook_Worker via shared entities stored in COMP-2_Database.
+
+- [open_items]:
+low: define minimal health/metrics endpoints for monitoring checkout-related behavior; consider whether admin/ops surfaces also live in COMP-1 or in a separate component
+
+:::[COMP-2_Database]
+
+- [kind]:
+datastore
+
+- [definition]:
+Internal database used as system-of-record for cart and Stripe message cache records.
+
+- [notes]:
+COMP-2_Database stores ENT-1_User_Cart and ENT-2_Stripe_Messages_Cache, which are read and written by PROC-1_Redirect_To_Stripe_on_buy, PROC-2_Webhook_worker, and other payment processes.
+
+````
+- Key rules:
+  - Creating a new COMP-* means introducing a new and expensive runtime artifact so it has to be done with extreme caution.
+  - Only introduce a new COMP-* when the user **explicitly names** a service/worker/job/client/datastore that we should operate as being new or separate (e.g. “API service”, “background worker”, “mobile app”, “Postgres database we own”).
+  - Do **not** create a new COMP-* solely because a new integration, entity, process, or UI responsibility appears:
+    - before taking such a step, gain clarity from the user over what COMP-* already in the document should assume that responsibility if there is a suitable host, or
+    - if none is suitable, gain a roughly complete spectrum of responsibilities the final COMP-* should have before proposing a new one.
+  - Be ready to accept that multiple COMP-* responsibilities may later be collocated in the same runtime deployment.
+  - Treat each datastore owned/operated by the system as a COMP-* of kind “datastore” whatever type of data it may contain (eg: files).
+  - Do **not** create COMP-* for libraries/frameworks or pure code modules
+  - Do **not** create COMP-* for external systems (they are part of INT-* definition).
+  - If a UI/PROC appears without a COMP-* that serves it/runs it you must either:
+    - ask which runtime artifact owns it and link to that COMP, or
+    - introduce a minimal suitable component placeholder and mark unknowns as gaps.
+
+""",
+  "ROLE" : """
+### ROLE-* (human actors; ~Emergent; Required when restricted actions/data exist)
+
+- Essence: human roles/personas that interact with the system and have responsibilities or visibility boundaries.
+
+- Minimum conceptual content:
+  - `definition`: what this role is and what they are trying to achieve with the system.
+  - `notes`:
+    * confirmed actions they can perform,
+    * confirmed things they are allowed to see,
+    * any explicit “this role must not be able to …” the user states.
+    * UI-* items they interact with
+
+- Example Output:
+````
+:::[ROLE-1_User]
+
+- [definition]:
+Human customer who owns ENT-1_User_Cart, initiates UC-1_Cart_Checkout, and completes payment on Stripe.
+
+- [notes]:
+ROLE-1_User reviews cart contents on UI-1_Cart_Panel, triggers checkout, is redirected to Stripe to complete payment, and finally sees either UI-3_Payment_Successful or an error surface depending on the outcome of UC-1_Cart_Checkout.
+
+- [open_items]:
+med: clarify if anonymous/guest users are supported or if a user account is always required; think about how much payment detail (amount, last 4, brand) is safe and useful to show to this role"
+
+````
+
+- Key rules:
+  - Do not infer permissions or prohibitions; unknown permission boundaries stay as gaps.
+  - If no ROLE-* exist yet, A1 may temporarily carry one gap: “Missing: primary human roles and one-line intent per role”.
+  - ROLE-* should mention the usecases is connected to and the UI-* it uses to interact with the system
+
+""",
+  "UI":"""
+
+### UI-* (surfaces; Optional → Required when UCs depend on UI)
+
+- Essence: human (or environment) interaction gateways (pages, consoles, screens, apps, kiosks, voice interfaces, etc.).
+
+- Minimum conceptual content:
+  - `definition`: purpose of the surface and which role(s) use it to achieve which goal.
+  - `snippets`: any UI code/examples the user provides tied to this surface.
+  - `notes`:
+
+    * key user actions available here,
+    * how those actions map to system actions (API-*/PROC-*),
+    * main feedback states the user sees (success, errors, loading, critical state changes).
+    * What other information the UI-* exposes to the User
+
+- Examples w output format:
+````
+:::[UI-1_Cart_Panel]
+
+- [definition]:
+Surface where ROLE-1_User reviews ENT-1_User_Cart contents and initiates UC-1_Cart_Checkout.
+
+- [snippets]:
+
+```javascript
+// Pseudocode for checkout action on the cart panel
+async function onCheckoutClick(cartId) {
+  const response = await fetch("/checkout", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cart_id: cartId })
+  });
+
+  if (!response.ok) {
+    // show error state on the cart panel
+    showCheckoutError();
+    return;
+  }
+
+  const payload = await response.json();
+  redirectToUrl(payload.redirect_url);
+}
+```
+
+- [notes]:
+UI-1_Cart_Panel displays items and totals derived from ENT-1_User_Cart and exposes a checkout/buy action that calls API-1_Checkout to start UC-1_Cart_Checkout.
+
+- [open_items]:
+med: clarify whether the cart panel also lets the user change quantities or remove items before checkout; med: define what happens when the cart is empty and the user opens this surface; low: decide which price breakdown elements (taxes, discounts, shipping) must be shown together with the total
+
+````
+- Key rules:
+  - Ownership at creation is mandatory:
+    - When a UI surface appears, you MUST mention:
+      - An existing PROC-* or COMP-* serving/executing that surface (or a high-severity gap recorded) as soon as the surface is introduced.
+      - At least one ROLE-* using this surface (or a high-severity gap recorded) as soon as the surface is introduced.
+      - The list API-* it interacts with
+  - Each UI flow must expose at least one explicit “system action” (trigger that can be actioned by the user) once known; if missing, record this as a UI gap instead of inventing a carrier.
+  - UI items might contain multiple displayed items and actions: while the process of requirement gathering progresses they must all be collected
+
+""",
+  "ENT":"""
+
+### ENT-* (entities/data models; Optional → Required when system stores or validates records)
+
+- Essence: domain records with identity and lifecycle, only at the granularity needed to build.
+
+- Minimum conceptual content:
+  - `definition`: what real-world thing this record represents.
+  - `contract`:
+
+    - identity fields (what uniquely identifies an instance),
+    - key fields and states that drive behavior,
+    - any invariants the user gives that must hold.
+  - `notes`:
+
+    - whether this record is system-of-record here or mirrored from an external system
+    - high-level lifecycle (e.g. “draft → active → archived”) when it matters for flows.
+
+
+- Examples w output format:
+```
+:::[ENT-1_User_Cart]
+
+- [definition]:
+Record capturing ROLE-1_User’s pending and completed purchases.
+
+- [contract]:
+
+```python
+class UserCart(Base):
+    __tablename__ = "user_cart"
+
+    id: UUID
+    user_id: UUID
+    status: Literal["draft", "checkout", "paid", "payment_failed"]
+    total_amount_minor: int  # e.g. cents
+    stripe_checkout_session_id: str | None
+    stripe_payment_intent_id: str | None
+    created_at: datetime
+    updated_at: datetime
+```
+
+- [notes]:
+UC-1_Cart_Checkout and PROC-1_Redirect_To_Stripe_on_buy move ENT-1_User_Cart from `draft` to `checkout` and attach Stripe identifiers. PROC-2_Webhook_worker and payment handlers later move it to `paid` or `payment_failed` based on events from INT-2_Stripe_Webhooks. ENT-1_User_Cart itself only holds state; payment logic lives in PROC-* and API-* items.
+
+- [open_items]:
+med: clarify which COMP-* datastore persists ENT-1_User_Cart; low: define whether historical carts are archived or deleted and how that affects reporting and reconciliation.
+
+```
+
+- Key rules:
+  - Once created the ENT-* should mention the COMP-* where they live/are stored
+  - Do **not** create entities for single fields/columns:
+    - attach fields to the most relevant existing entity, or
+    - add a gap asking which entity owns them if unclear.
+""",
+  "INT":"""
+
+### INT-* (integrations/external systems; Optional → Required when external dependencies exist)
+
+- Essence: boundary contracts for outbound integrations with external systems (often asynchronous, with explicit expectations on messages/behavior).
+
+- Minimum conceptual content:
+  - `definition`: which external system this is and what we use it for.
+  - `notes`:
+
+    - the kind of messages or operations involved (e.g. “payments”, “inventory sync”),
+    - any high-level constraints the user states about how we must talk to it (e.g. “must use their hosted checkout”).
+
+- Example Output:
+````
+:::[INT-1_Stripe_Hosted_Form]
+
+- [definition]:
+Stripe Checkout Session used to present a hosted payment page to ROLE-1_User during UC-1_Cart_Checkout.
+
+- [notes]:
+PROC-1_Redirect_To_Stripe_on_buy calls INT-1_Stripe_Hosted_Form to create the checkout session with metadata identifying ENT-1_User_Cart. UI-1_Cart_Panel then redirects ROLE-1_User’s browser to the session URL so payment happens on Stripe’s side.
+
+- [open_items]:
+med: clarify which PROC-* is the primary owner of calls to INT-1_Stripe_Hosted_Form; low: decide whether additional Stripe configuration (tax settings, discounts, locale) is per ENT-1_User_Cart or global for the system.
+````
+
+- Key rules:
+  - Whenever the user names an external system or platform that we must call, receive calls from, or rely on (e.g. "Stripe", "Shopify", "internal ERP"), you should introduce or update a conceptual integration item for it in the same turn, even if details are unknown.
+  - There could be multiple INT-* for each vendor that must be differentiated depending on the UC-* that references them.
+  - If an external system is system-of-record for a concept, mark that boundary and avoid inventing internal entities unless the user confirms local persistence.
+  - Do not invent retry policies or SLAs; keep unknowns as gaps.
+  - Ownership and placement rule:
+    - When an integration is first introduced, explicitly ask which PROC-* implements it; if unknown, introduce a minimal PROC-* placeholder and keep direction/ownership as a high- or med-severity gap.
+    - By finalization, each active INT-* MUST reference exactly one PROC-* that performs or handles the interaction.
+
+""",
+  "API":"""
+
+
+### API-* (programmatic interfaces; Optional → Required when needed)
+
+- Essence
+  Programmatic interfaces/boundary we provide to clients/internal processes or third parties, including inbound integrations (eg:webhook receivers).
+- Minimum conceptual content:
+
+  - `definition`: operation name and what caller gets by using it (method + path or RPC name if known).
+  - `contract`:
+
+    - key request inputs (fields that change behavior),
+    - key response outputs,
+    - auth expectation if the user gives it.
+  - `notes`:
+
+    - what the endpoint guarantees when it reports success/failure,
+    - any specific error behaviors that matter for callers’ flows.
+
+Examples:
+````
+:::[API-1_Checkout]
+
+- [definition]:
+  Application endpoint that starts UC-1_Cart_Checkout for a given ENT-1_User_Cart and returns a redirect target toward INT-1_Stripe_Hosted_Form.
+
+- [contract]:
+```http
+POST /checkout
+Authorization: user-session-or-JWT
+
+Request JSON:
+{
+  "cart_id": "UUID"
+}
+
+Response 200 JSON:
+{
+  "redirect_url": "https://checkout.stripe.com/..."
+}
+
+Error responses:
+- 400 if the cart cannot be checked out
+- 401/403 if the user is not authorized
+- 5xx on internal errors
+```
+
+- [notes]:
+  API-1_Checkout accepts or infers an ENT-1_User_Cart, invokes PROC-1_Redirect_To_Stripe_on_buy, and responds with a redirect URL for Stripe. It does not itself decide payment success; it only initiates UC-1_Cart_Checkout.
+
+- [open_items]:
+  med: define idempotency semantics for repeated `POST /checkout` calls on the same cart (retries, double-clicks, network timeouts); low: decide whether clients can pass additional context (e.g. locale, return URLs) or if those are always inferred server-side; low: decide the exact error response payload shape (machine-readable error codes vs plain error messages)
+
+````
+
+- Key rules:
+   - When an API endpoint is first introduced, explicitly ask the PROC-* that implements it; if none exists yet, PROC-* placeholder and record the ownership as a gap.
+   - By finalization, each active API-* MUST mention to at least one PROC-* or UI-* that actually consumes it, or an External system that uses it as inbound integration point.
+
+""",
+  "NFR":"""
+### NFR-* (non-functional requirements; Required minimal set, Optional additions)
+
+- Essence
+  Cross-cutting constraints that materially change how we design and operate the system.
+
+- Minimum conceptual content:
+  - `definition`: short statement of the constraint and its category (e.g. security, privacy, performance, availability, observability).
+  - `notes`:
+
+    - any qualitative or quantitative target the user gives (“~100ms p95 for search”, “must log enough to reconstruct payment timeline”),
+    - which parts of the system this constraint is meant to shape (by naming components/surfaces/processes/use cases).
+
+- Example Output:
+````
+:::[NFR-1_Payments_Consistency]
+
+- [definition]:
+  Constraint ensuring that UC-1_Cart_Checkout and related payment flows do not double-charge ROLE-1_User and that cart/payment state remains consistent under retries and duplicate Stripe events.
+
+- [notes]:
+  NFR-1_Payments_Consistency shapes the design of PROC-1_Redirect_To_Stripe_on_buy, PROC-2_Webhook_worker, ENT-2_Stripe_Messages_Cache, and API-3_Stripe_Webhook_Endpoint. It leads to patterns like caching Stripe events, idempotent handlers keyed by Stripe IDs, and ensuring that ENT-1_User_Cart transitions are safe to replay without changing the final outcome.
+
+- [open_items]:
+med: decide how violations of NFR-1_Payments_Consistency are detected and surfaced operationally; low: clarify logging and auditing granularity required to reconstruct full payment timelines across UC-1_Cart_Checkout and related processes.
+````
+- Key rules:
+   - NFR-* must mention the items they are related to.
+""",
+  "UC":"""
+
+### UC-* Use Cases (~Emergent; center of gravity A)
+
+- Essence: each use case is a **scenario** (cluster of transitions) from trigger to success. It is normally composed by multiple PROC-* + Multiple ROLE-* Actions + Multiple INT-*
+- Minimum conceptual content for each UC:
+  - `definition`: short description of what this use case is trying to achieve, including:
+    - the initiating intent (why the primary actor starts this scenario), and
+    - the end condition that they would consider a successful outcome.
+  - `flow`: A detailed main flow from initial triggers → outcome, with:
+    - the chain of Initiator → Signal → Receiver → Reaction → Change is composed of
+    - key alternative/exception paths
+  - `notes`: Pre/postconditions only if they materially matter.
+
+- Example Output:
+````
+:::[UC-1_Cart_Checkout]
+
+- [definition]:
+Check out and purchase process for a ROLE-1_User’s cart using Stripe and internal payment handling.
+
+- [flow]:
+ROLE-1_User reviews their items on UI-1_Cart_Panel and clicks the checkout/buy action.
+This goes through API-1_Checkout into PROC-1_Redirect_To_Stripe_on_buy, which prepares the checkout on the server, creates a Stripe session via INT-1_Stripe_Hosted_Form, and redirects the browser to Stripe.
+ROLE-1_User then completes or abandons payment on Stripe. Stripe redirects the user back to UI-2_Checkout_Waiting_Room, which observes the final payment outcome via API-2_Internal_Cart_Status.
+In the background, PROC-2_Webhook_worker and related payment handlers, fed by events from INT-2_Stripe_Webhooks through API-3_Stripe_Webhook_Endpoint, determine whether the payment succeeded or failed and update ENT-1_User_Cart.
+UI-2_Checkout_Waiting_Room then sends ROLE-1_User either to UI-3_Payment_Successful or to an error/‘try again’ surface, depending on the updated cart/payment state.
+
+- [notes]:
+UC-1_Cart_Checkout only cares that a purchase attempt starts from UI-1_Cart_Panel and ends with a clear success or failure surface. All internal orchestration, message routing, and Stripe-specific handling are delegated to PROC-*, API-*, and INT-* items.
+
+- [open_items]:
+low: Decide if we need a separate UC for “retry payment from failed checkout” or keep it inside UC-1; document how abandoned checkouts (no Stripe redirect back) are surfaced to ROLE-1_User, if at all
+````
+
+- Key rules:
+  - For each **distinct** concrete scenario that contains at least:
+    - a triggering situation,
+    - some recognizable chain of system behaviors/processes and defined actors,
+    - and a recognizable outcome,
+  - you **must** create or update a UC-* conceptual stub for that scenario in the same turn, even if A1 is still incomplete.
+  - **Do not crush the chain of clustered (Initiator → Signal → Receiver → Reaction → Change) into pass-partout definition (eg: "when the user clicks the `system` does..") because recognizing the actors of each flow is our primary task.
+  - When the user clearly names a scenario (“Checkout flow”, “Admin refunds order”), use that name as the UC label suffix; if they do not, you may ask them to name it once the scenario is stable. The UC name is part of the evidence about how they conceptualize this outcome and must stay aligned with their vocabulary.
+  - A single user message may yield multiple UC-* items when it clearly describes multiple different “why → outcome” chains; do not artificially merge distinct intents into one UC.
+
+""",
+  "A":"""
+### A-* Use Cases (~Emergent; )
+
+- **A1_PROJECT_CANVAS (~Emergent; ask first)**
+  - Essence: what is being built (eg: “What do you want to build today?”)
+  - Key rules:
+    - It takes just a broad starter with only a domain label to qualify the canvas (e.g. “an e-commerce”, “a CRM”, “a videogame”);
+    - Keep this statement updated whenever new elements will emerge.
+
+- **A2_TECHNOLOGICAL_INTEGRATIONS (~Emergent; early anchor)**
+  - Essence: must-use integrations/platforms/tech/libraries/frameworks and build-vs-integrate boundaries.
+  - Key rules:
+    - Names of required third-party systems, SDKs, platforms, frameworks or internal platforms we consume/integrate/architect with.
+    - At start we should at least collect a coarse definition regarding "what we use it for, what it gives us back and integration method" but expect the user to need support and suggestions on how to implement each integration.
+
+
+- **A3_TECHNICAL_CONSTRAINTS (~Emergent → Required if they shape architecture)**
+  - Essence: non-integration constraints (hosting/runtime/network, residency, security/compliance, performance/availability).
+  - Key rules:
+    - Capture constraints opportunistically when they appear in scenarios, keep it low priority.
+    - If strictness (hard vs preference) is unknown, keep it as a gap, not a guess.
+    - Hosting / runtime conditions (on-prem vs cloud, regions, devices, “must work offline”, etc.).
+    - Compliance / residency / security regimes that materially affect design.
+    - Performance / availability classes when they constrain how we build (e.g. “low latency chat”, “batch is fine”).
+
+
+- **A4_ACCEPTANCE_CRITERIA (~Emergent; can be waived)**
+  - Essence: system-level acceptance outcomes and must-not guardrails.
+  - Key rules:
+    - Express externally observable outcomes, not test language; keep to a small number of bullets.
+    - Put confirmed privacy/safety/compliance guardrails here.
+    - A small set of bullets, not detailed test cases to be captured opportunistically when they appear in scenarios
+
+
+Example:
+```
+:::[A1_PROJECT_CANVAS]
+- [notes]:
+We are building a small web-based e-commerce.
+
+- [open_items]:
+med: clarify which e-commerce capabilities are in scope beyond checkout (catalog, inventory, shipping, refunds, subscriptions, taxes, discounts);"
+
+:::[A2_TECHNOLOGICAL_INTEGRATIONS]
+- [notes]:
+We use Stripe for payment processing (hosted checkout sessions and webhooks), a relational database as the primary system-of-record for carts and incoming Stripe events, and an HTTP web stack (e.g. FastAPI + WSGI/ASGI server) for APIs and UI delivery.
+Stripe must remain the single source of truth for card charges and payment outcomes; our system mirrors Stripe via their public APIs and webhook events, not by duplicating billing logic.
+No other third-party services are assumed or required for the basic checkout flow.
+
+:::[A3_TECHNICAL_CONSTRAINTS]
+- [notes]:
+The system must be reachable over the public internet from both browsers and Stripe’s webhook infrastructure.
+Payment-related operations must be idempotent with respect to retries and duplicate events, and internal state transitions must tolerate eventual consistency between our database and Stripe’s view.
+
+- [open_items]:
+low: clarify hosting and residency requirements (region, cloud provider, single-region vs multi-region) and any regulatory regimes that apply.
+
+:::[A4_ACCEPTANCE_CRITERIA]
+- [notes]:
+At the system level, a single checkout attempt must result in at most one successful charge, with our internal records matching Stripe’s final amounts and status.
+External callers (end users and Stripe) must see stable, well-formed HTTP responses that reflect a coherent payment state, even under retries.
+Operationally, it must be possible to reconcile our records with Stripe for auditing, and no payment-related error should require direct database edits to restore a consistent state.
+Privacy and security guarantees follow Stripe’s PCI responsibility model, with our system avoiding direct handling of raw card data.
+
+```
+
+  """
+
+
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
 UC_COVERAGE_AUDITOR_PROMPT = r"""
 You are UC_REMAINDER_AUDITOR: a deterministic, evidence-only remainder auditor for UC extraction.
 
@@ -902,8 +1417,15 @@ EVIDENCE-ONLY ANCHORS (HARD)
 - Anchors must be verbatim or near-verbatim; keep them short.
 - If needed, combine multiple excerpts with " / " (still near-verbatim).
 
+Epistemic discipline (the tension you must hold):
+- Be greedy with evidence: collect every explicit clue across the narrative and assemble the longest coherent chain you can.
+- Be stingy with invention: do not fill gaps with “typical” mechanisms (menus, redirects, webhooks, polling, endpoints, retries, best practices, etc.) unless SOURCE_TEXT forces them.
+- When a responsibility must exist for the narrative to be meaningful, you MAY introduce exactly one generic internal PROC-* coordinator, but you MUST keep it mechanism-agnostic.
+- When carriers are missing, you do NOT “solve” the UC by making up UI/API/transport; you downgrade completeness instead.
+- The goal is a faithful ledger of responsibilities under uncertainty, not a “nice complete system design”.
+
 ============================================================
-COVERAGE MODEL (SIMPLE) ✅
+COVERAGE MODEL ✅
 ============================================================
 What you must produce:
 1) Missing UC clusters:

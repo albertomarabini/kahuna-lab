@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any, Dict, Optional, Tuple
 from pathlib import Path
 import os
@@ -100,7 +101,7 @@ def estimate_cost_usd(
     cost = _per_million_stripe(in_rate, prompt_tokens) + _per_million_stripe(out_rate, completion_tokens)
     price = _per_million_stripe(in_rate, prompt_tokens) * multipliers[0]
     price += _per_million_stripe(out_rate, completion_tokens) * multipliers[1]
-    return float(cost), float(price)
+    return float(math.ceil(cost)), float(math.ceil(price))
 
 def get_internal_model_configuration(configuration_name: str) -> Tuple[str,str,str]:
     """

@@ -36,7 +36,7 @@ class BaseLlmClient:
                     completion_tokens=int(inc["candidates_token_count"]),
                     # model_configuration=getattr(self, "model_configuration", None),
                     service_tier=None,
-                )
+                )[1]
             if self.last_usage is None:
                 self.last_usage = inc
                 return
@@ -78,7 +78,8 @@ class BaseLlmClient:
         if not self.last_usage:
             return  0.0
         else:
-            return getattr(self.last_usage, "accrued_cost", 0.0)
+            return self.last_usage.get("accrued_cost", 0.0)
+
 
 
 class LlmClient(BaseLlmClient):

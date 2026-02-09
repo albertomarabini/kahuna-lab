@@ -55,10 +55,9 @@ from classes.entities import Base, QueueMessage
 from classes.backend import (
     Backend,
     _job_ctx_var,
-    GLOBAL_HISTORY_CACHE,
     GLOBAL_BSS_HISTORY_CACHE,
 )
-from classes.google_helpers import IS_LOCAL_DB, get_db_engine
+from classes.GCConnection_hlpr import GCConnection
 
 
 logging.basicConfig(
@@ -103,7 +102,7 @@ class JobContext:
 
 class AppHost:
     def __init__(self, Session, receiver_id: str, apps: List[Any]):
-        self.Session = Session
+        self.SessionFactory = Session
         self.receiver_id = receiver_id
         self.apps = list(apps or [])
 
@@ -120,7 +119,7 @@ class AppHost:
         payload: Dict[str, Any],
         from_sender_id: str,
     ) -> None:
-        session = self.Session()
+        session = self.SessionFactory()
         try:
             session.add(
                 QueueMessage(
@@ -200,15 +199,12 @@ class ChatApp:
         pass
 
     def sweep(self) -> None:
-        removed = GLOBAL_HISTORY_CACHE.sweep_expired()
-        if removed:
-            logger.debug("HistoryCache sweep: removed %d expired histories", removed)
         removed2 = GLOBAL_BSS_HISTORY_CACHE.sweep_expired()
         if removed2:
             logger.debug("BSS HistoryCache sweep: removed %d expired BSS histories", removed2)
         removed3 = IDEMPOTENCY_CACHE.sweep_charged()
         if removed3:
-            logger.debug("IdempotencyCache sweep: removed %d charged keys", removed)
+            logger.debug("IdempotencyCache sweep: removed %d charged keys", removed3)
 
     def handle(self, job: Dict[str, Any], ctx: JobContext) -> Dict[str, Any]:
         backend = Backend()
@@ -243,6 +239,7 @@ class AsyncGuard:
         self.poll_interval = poll_interval
         self.max_concurrent = max_concurrent
         self._in_flight = set()
+        self.SessionFactory = GCConnection().build_db_session_factory()
 
     async def _run_executor_for_message(self, job: Dict[str, Any]) -> None:
         executor = Executor(self.host)
@@ -262,7 +259,7 @@ class AsyncGuard:
                 await asyncio.sleep(self.poll_interval)
                 continue
 
-            session = self.host.Session()
+            session = self.SessionFactory()
             try:
                 rows = (
                     session.query(QueueMessage)
@@ -316,10 +313,7 @@ def main() -> None:
     apps = [
         ChatApp(),
     ]
-    engine = get_db_engine()
-    Base.metadata.create_all(engine)
-    session = sessionmaker(bind=engine)
-    host = AppHost(session, receiver_id=QUEUE_RECEIVER_ID, apps=apps)
+    host = AppHost(GCConnection().build_db_session_factory(), receiver_id=QUEUE_RECEIVER_ID, apps=apps)
     guard = AsyncGuard(
         host=host,
         receiver_id=QUEUE_RECEIVER_ID,

@@ -5,10 +5,10 @@ import traceback
 import commentjson
 import yaml
 
+from classes.chat_prompts import BSS_PROMPT_EXAMPLES
 from classes.entities import Project
 from classes.google_helpers import PROJECT_ID, REGION
 from classes.llm_client import ChatLlmClient, LlmClient
-from classes.schema_manager import SchemaManager
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -159,8 +159,6 @@ Thanks :)
         except TypeError:
             return str(value).strip()
 
-
-
     def unsafe_string_format(self, dest_string, print_unused_keys_report=True, **kwargs):
         """
         Formats a destination string by replacing placeholders with corresponding values from kwargs.
@@ -265,21 +263,6 @@ Thanks :)
             chat_llm if chat_llm is not None else self.default_chat_llm,
         )
 
-    def _safe_error_response(self, current_schema, error: Exception):
-        logger.info(f"[handle_chat] Error: {error}")
-        traceback.print_exc()
-
-        return {
-            "bot_message": (
-                "I ran into an internal error while processing your request. "
-                "Nothing was changed in the requirements. Please retry your last message."
-            ),
-            "updated_schema": current_schema,
-            "discrepancies": [],
-            "schema_change_description": "",
-            "updated_project_description": ""
-        }
-
     # -----------------------
     # LLM plumbing
     # -----------------------
@@ -306,75 +289,6 @@ Thanks :)
             return None, None
 
 
-    # -----------------------
-    # Direct Schema Edit
-    # -----------------------
-
-
-    def handle_direct_schema_command(self, project_id: str, payload):
-        current_schema = self.load_project(project_id)
-        current_schema_json = json.dumps(current_schema)
-
-        schema_manager = SchemaManager(self.default_llm)
-
-        updated_schema_str, discrepancies, _ = schema_manager.apply_commands_to_schema(
-            current_schema_json,
-            json.dumps(payload),
-            self.requirements_schema
-        )
-        updated_schema = json.loads(updated_schema_str)
-        if not discrepancies:
-            self.save_project(project_id, updated_schema)
-
-        return {
-            "updated_schema": updated_schema,
-            "discrepancies": discrepancies,
-        }
-
-    def handle_delete_node(self, project_id: str, payload):
-        path = (payload or {}).get("path", "") or ""
-        if not path:
-            current_schema = self.load_project(project_id)
-            return self._safe_error_response(current_schema, ValueError("Missing 'path' in delete_node payload"))
-
-        if path.startswith("$."):
-            normalized_path = path
-        elif path.startswith("$"):
-            normalized_path = "$." + path[1:]
-        else:
-            normalized_path = "$." + path
-
-        current_schema = self.load_project(project_id)
-        current_schema_json = json.dumps(current_schema)
-
-        delete_command = json.dumps({
-            "delete": [
-                {"path": normalized_path}
-            ]
-        })
-
-        schema_manager = SchemaManager(self.default_llm)
-
-        try:
-            updated_schema_str, discrepancies, _ = schema_manager.apply_commands_to_schema(
-                current_schema_json,
-                delete_command,
-                self.requirements_schema
-            )
-            updated_schema = json.loads(updated_schema_str)
-            if not discrepancies:
-                self.save_project(project_id, updated_schema)
-
-            return {
-                "bot_message": f"Node at path '{normalized_path}' has been deleted." if not discrepancies
-                               else f"Could not safely delete node at '{normalized_path}'.",
-                "updated_schema": updated_schema,
-                "discrepancies": discrepancies,
-            }
-        except Exception as e:
-            return self._safe_error_response(current_schema, e)
-
-
 
     # -----------------------
     # BSS CHat
@@ -391,80 +305,238 @@ Thanks :)
 
 
     def _parse_bss_output(self, raw: str, llm=None) -> tuple[dict, str, bool]:
-        malformed_json_found = False
-        PARSE_ERROR_SUFFIX = " <== This JSON format cannot be parsed. Please correct it as part of your next task"
+        """
+        Parse LLM output in the new BSS format.
 
-        updates: dict[str, object] = {}
+        Expected high-level structure:
+
+        CHANGE_PROPOSALS:
+        :::[LABEL] status=`...`
+        - [segment]:
+        body...
+
+        ...
+
+        NEXT_QUESTION:
+        <multi-line question text...>
+
+        Rules:
+        - Only labels the LLM wants to add/change are present.
+        - Only segments it wants to change/add are present.
+        - Delete: a block like
+            :::[LABEL]
+            delete
+        - ask_log is append-only; we return it separately as 'ask_log_append'.
+        """
         text = (raw or "").strip()
+        if not text:
+            return {}, "", False
 
-        # --- Extract NEXT_QUESTION (take the last occurrence) ---
-        nq_idx = text.rfind("NEXT_QUESTION:")
-        if nq_idx < 0:
-            raise ValueError("Missing NEXT_QUESTION in orchestrator output")
+        # We support a tolerant layout:
+        # - CHANGE_PROPOSALS: ... (optional)
+        # - NEXT_QUESTION:    ... (optional; if missing we derive it from trailing text)
 
-        nq_line = text[nq_idx:].splitlines()[0]
-        next_question = nq_line.split(":", 1)[1].strip() if ":" in nq_line else ""
-        if len(next_question) >= 2 and next_question[0] == next_question[-1] and next_question[0] in ("'", '"'):
-            next_question = next_question[1:-1].strip()
-
-        items_text = text[:nq_idx].rstrip()
-        if not items_text:
-            return updates, next_question, False
-
-        # --- Find label headers at start-of-line, and require '"status":' right after ':' ---
-        label_header_re = re.compile(
-            r'(?m)^\s*('
-            r'(?:A\d+_[A-Z0-9_]+)'
-            r'|'
-            r'(?:(?:UC|PROC|COMP|ROLE|UI|ENT|INT|API|NFR)-?\d+_[A-Z0-9_]+)'
-            r')\s*:(?=\s*"status"\s*:)',
-            flags=re.IGNORECASE,
+        block_header_re = re.compile(
+            r"^:::\[([^\]]+)\](?:\s+status\s*=\s*`([^`]*)`)?\s*$",
+            flags=re.MULTILINE,
         )
 
-        matches = list(label_header_re.finditer(items_text))
+        # Marker positions (if present)
+        m_cp = re.search(r"^CHANGE_PROPOSALS\s*:\s*$", text, flags=re.MULTILINE)
+        m_nq = re.search(r"^NEXT_QUESTION\s*:\s*$", text, flags=re.MULTILINE)
+
+        changes_region = ""
+        next_question = ""
+
+        if m_nq:
+            # Explicit NEXT_QUESTION: label – everything after it is the question
+            next_question = text[m_nq.end():].strip()
+
+            if m_cp and m_cp.start() < m_nq.start():
+                # CHANGE_PROPOSALS: explicitly present before NEXT_QUESTION:
+                changes_region = text[m_cp.end():m_nq.start()].strip()
+            else:
+                # No explicit CHANGE_PROPOSALS: – treat everything before NEXT_QUESTION: as changes
+                changes_region = text[:m_nq.start()].strip()
+        else:
+            # No explicit NEXT_QUESTION: – derive question from trailing text
+            if m_cp:
+                changes_candidate = text[m_cp.end():].strip()
+            else:
+                changes_candidate = text
+
+            matches_all = list(block_header_re.finditer(changes_candidate))
+            if not matches_all:
+                # Nothing looks like change blocks -> treat entire thing as question
+                return {}, changes_candidate.strip(), False
+
+            # We have one or more blocks; treat everything through the end of the last block
+            # as change proposals, and any trailing text as the question.
+            last_body_end = len(changes_candidate)
+            for idx, mh in enumerate(matches_all):
+                body_start = mh.end()
+                body_end = (
+                    matches_all[idx + 1].start()
+                    if idx + 1 < len(matches_all)
+                    else len(changes_candidate)
+                )
+                if idx == len(matches_all) - 1:
+                    last_body_end = body_end
+
+            changes_region = changes_candidate[:last_body_end].strip()
+            next_question = changes_candidate[last_body_end:].strip()
+
+        if not changes_region:
+            return {}, next_question, False
+
+        # --- Blocks: :::[LABEL] [status=`...`] ---
+        matches = list(block_header_re.finditer(changes_region))
         if not matches:
-            return updates, next_question, False
+            # No change proposals; just a follow-up question.
+            return {}, next_question, False
+
+        updates: dict[str, dict] = {}
 
         for i, m in enumerate(matches):
             label = (m.group(1) or "").strip()
-            start = m.start()
-            body_start = m.end()
-            body_end = matches[i + 1].start() if i + 1 < len(matches) else len(items_text)
+            status = m.group(2)
+            status = (status or "").strip() if status is not None else None
 
-            body = items_text[body_start:body_end].strip()
-            if not self._is_bss_label(label):
+            if not label or not self._is_bss_label(label):
                 continue
 
-            # Accept either already-braced object or the new "fields only" object.
-            candidate = body
-            if candidate.startswith("{") and candidate.endswith("}"):
-                obj_str = candidate
-            else:
-                # tolerate trailing commas
-                candidate = candidate.rstrip().rstrip(",")
-                obj_str = "{" + candidate + "}"
+            label_type = self._bss_label_type(label) or ""
+            allowed_segments = self._bss_allowed_segments_for_type(label_type)
 
-            try:
-                obj = self.load_fault_tolerant_json(obj_str, llm=llm)
-                if isinstance(obj, dict):
-                    if "value" in obj and "definition" not in obj:
-                        obj["definition"] = obj.pop("value")
-                    if "Definition" in obj and "definition" not in obj:
-                        obj["definition"] = obj.pop("Definition")
-                    updates[label] = obj
-                else:
-                    updates[label] = obj_str + PARSE_ERROR_SUFFIX
-                    malformed_json_found = True
-            except Exception:
-                updates[label] = obj_str + PARSE_ERROR_SUFFIX
-                malformed_json_found = True
+            block_start = m.end()
+            block_end = matches[i + 1].start() if i + 1 < len(matches) else len(changes_region)
+            block_text = changes_region[block_start:block_end].strip()
 
-        return updates, next_question, malformed_json_found
+            # Delete block: just "delete"
+            if re.fullmatch(r"(?is)\s*delete\s*", block_text or ""):
+                updates[label] = {"cancelled": True}
+                continue
+
+            # Segments: - [name]:
+            seg_re = re.compile(r"^-\s*\[([^\]]+)\]\s*:\s*$", flags=re.MULTILINE)
+            seg_matches = list(seg_re.finditer(block_text))
+
+            segments: dict[str, str] = {}
+            open_items_value: str | None = None
+            ask_log_append: str | None = None
+
+            if seg_matches:
+                for j, sm in enumerate(seg_matches):
+                    seg_name_raw = sm.group(1).strip()
+                    seg_key = seg_name_raw.lower()
+
+                    # Enforce allowed segments per family.
+                    if seg_key not in allowed_segments:
+                        self.color_print(
+                            (
+                                f"[BSS] Invalid segment '{seg_name_raw}' for label {label} "
+                                f"(type {label_type or 'UNKNOWN'}). "
+                                f"Allowed segments: {sorted(allowed_segments)}"
+                            ),
+                            color="red",
+                        )
+                        # Do not apply this segment.
+                        continue
+
+                    seg_body_start = sm.end()
+                    seg_body_end = seg_matches[j + 1].start() if j + 1 < len(seg_matches) else len(block_text)
+                    body = block_text[seg_body_start:seg_body_end]
+
+                    # Drop leading newline, keep internal newlines as-is
+                    if body.startswith("\n"):
+                        body = body[1:]
+                    body = body.rstrip()
+                    if not body:
+                        continue
+
+                    if seg_key == "ask_log":
+                        ask_log_append = body if ask_log_append is None else (ask_log_append + "\n" + body)
+                    elif seg_key == "open_items":
+                        open_items_value = body
+                    else:
+                        segments[seg_key] = body
+
+            patch: dict[str, object] = {}
+
+            if status is not None:
+                patch["status"] = status
+
+            if segments:
+                patch["segments"] = segments
+
+            if open_items_value is not None:
+                patch["open_items"] = open_items_value
+
+            if ask_log_append:
+                patch["ask_log_append"] = ask_log_append
+
+            # If nothing meaningful in this block, skip it
+            if not patch:
+                continue
+
+            updates[label] = patch
+
+        malformed = False
+        return updates, next_question, malformed
 
 
 
+
+    # -----------------------
+    # Prep doc for LLM
+    # -----------------------
+
+    def _split_definition_segments(self, definition: str) -> dict[str, str]:
+        """
+        Split a legacy pipe-delimited definition string into named segments.
+
+        Example input:
+        "Definition: ... | Flow: ... | Notes: ... | References: ..."
+
+        Returns a dict with lowercase keys like:
+        {"definition": "...", "flow": "...", "notes": "..."}.
+        """
+        if not isinstance(definition, str) or not definition.strip():
+            return {}
+
+        text = definition
+        header_re = re.compile(
+            r"(^|(?<!\\)\|)\s*("
+            r"Definition|Flow|Contract|Contracts|Snippets|Outcomes|Decision|Notes|References|Kind"
+            r")\s*:\s*",
+            flags=re.IGNORECASE,
+        )
+
+        matches = list(header_re.finditer(text))
+        if not matches:
+            # No structured segments → treat whole thing as 'definition'
+            return {"definition": text.strip()}
+
+        segments: dict[str, str] = {}
+        for i, m in enumerate(matches):
+            name_raw = (m.group(2) or "").strip()
+            key = name_raw.lower()
+            start = m.end()
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+            body = text[start:end].strip()
+            if body:
+                segments[key] = body
+
+        return segments
 
     def _bss_current_document_for_prompt(self, bss_schema: dict) -> str:
+        """
+        Build the BSS document text sent to the LLM in the new format:
+
+        :::[LABEL] status=`...`
+        - [segment]:
+        body...
+        """
         flat: dict[str, dict] = {}
         for label, item in self._iter_bss_items(bss_schema):
             flat[label] = self._normalize_bss_item(item)
@@ -472,14 +544,121 @@ Thanks :)
         ordered_labels = sorted(flat.keys(), key=self._bss_label_sort_key)
 
         lines: list[str] = []
+
         for label in ordered_labels:
             obj = flat[label]
-            s = json.dumps(obj, ensure_ascii=False)
-            if s.startswith("{") and s.endswith("}"):
-                s = s[1:-1]
-            lines.append(f"{label}:{s}")
+            status = (obj.get("status") or "").strip()
 
-        return "\n".join(lines)
+            # -------------------
+            # Build logical segments
+            # -------------------
+            segments: dict[str, str] = {}
+
+            definition_text = obj.get("definition") or ""
+            label_type = self._bss_label_type(label)
+
+            if label_type == "A":
+                # For A-items, "notes" is effectively the definition
+                if definition_text.strip():
+                    segments["notes"] = definition_text.strip()
+            else:
+                segs = self._split_definition_segments(definition_text)
+                for seg_name, seg_body in segs.items():
+                    # References segment disappears from the LLM-facing document
+                    if seg_name == "references":
+                        continue
+                    segments[seg_name] = seg_body
+
+            open_items = (obj.get("open_items") or "").strip()
+            if open_items:
+                segments["open_items"] = open_items
+
+            ask_log = (obj.get("ask_log") or "").strip()
+            if ask_log:
+                segments["ask_log"] = ask_log
+
+            # -------------------
+            # Render header
+            # -------------------
+            lines.append(f":::[{label}] status=`{status}`")
+
+            # Stable segment order; anything unknown comes later
+            preferred_order = [
+                "kind",
+                "definition",
+                "flow",
+                "notes",
+                "contract",
+                "contracts",
+                "snippets",
+                "outcomes",
+                "decision",
+                "open_items",
+                "ask_log",
+            ]
+            seen = set()
+
+            for key in preferred_order:
+                value = segments.get(key)
+                if not value or not value.strip():
+                    continue
+                seen.add(key)
+                lines.append(f"- [{key}]:")
+                lines.append(value.rstrip())
+                lines.append("")  # blank line after segment
+
+            # Any extra segments not in preferred_order
+            for key in sorted(segments.keys()):
+                if key in seen:
+                    continue
+                value = segments[key]
+                if not value or not value.strip():
+                    continue
+                lines.append(f"- [{key}]:")
+                lines.append(value.rstrip())
+                lines.append("")
+
+            # Blank line between items
+            lines.append("")
+
+        return "\n".join(lines).strip()
+
+    def _log_missing_required_segments(self, label: str, segments: dict[str, str]) -> None:
+        """
+        After applying a patch and rebuilding segments, log if mandatory
+        segments are missing for a given label type.
+        """
+        label_type = self._bss_label_type(label) or ""
+
+        required_by_type: dict[str, list[str]] = {
+            # Project-level canvas: at least some notes
+            "A": ["notes"],
+            # Use cases: we expect a definition and a flow
+            "UC": ["definition", "flow"],
+            # All others: at least a definition
+            "COMP": ["definition"],
+            "PROC": ["definition"],
+            "ROLE": ["definition"],
+            "UI": ["definition"],
+            "ENT": ["definition"],
+            "INT": ["definition"],
+            "API": ["definition"],
+            "NFR": ["definition"],
+        }
+
+        required = required_by_type.get(label_type, [])
+        if not required:
+            return
+
+        missing = [
+            name for name in required
+            if not (segments.get(name) or "").strip()
+        ]
+        if missing:
+            logger.warning(
+                f"[BSS] Missing expected segments for {label} (type {label_type}): "
+         ", ".join(missing)
+            )
 
 
 
@@ -567,6 +746,125 @@ Thanks :)
             return None
         return m.group(1).upper()
 
+
+    def _bss_example_kwargs(self, bss_schema: dict) -> dict:
+        REQUIRED = {
+            "A":   {"notes"},
+            "UC":  {"definition","flow","notes"},
+            "PROC":{"definition","flow","snippets","notes"},
+            "COMP":{"definition","kind","notes"},
+            "ROLE":{"definition","notes"},
+            "UI":  {"definition","snippets","notes"},
+            "ENT": {"definition","contract","notes"},
+            "INT": {"definition","notes"},
+            "API": {"definition","contract","notes"},
+            "NFR": {"definition","notes"},
+        }
+
+        RULES = {
+            # For A: at least 1 example, but each notes field must be >= 1000 chars
+            "A":   {"min_ce": 1, "min_chars": {}},
+            "UC":  {"min_ce": 3, "min_chars": {"flow": 3000}},
+            "PROC":{"min_ce": 3, "min_chars": {"snippets": 1500, "flow": 1500}},
+            "COMP":{"min_ce": 3, "min_chars": {}},
+            "ROLE":{"min_ce": 3, "min_chars": {}},
+            "UI":  {"min_ce": 3, "min_chars": {"snippets": 1500}},
+            "ENT": {"min_ce": 3, "min_chars": {"contract": 1000}},
+            "INT": {"min_ce": 3, "min_chars": {}},
+            "API": {"min_ce": 3, "min_chars": {"contract": 1000}},
+            "NFR": {"min_ce": 3, "min_chars": {}},
+        }
+        # stats: family -> {"ce": int, "chars": {seg: int}}
+        stats: dict[str, dict] = {}
+        for fam in RULES.keys():
+            stats[fam] = {"ce": 0, "chars": {}, "min_notes_len": None}
+
+        for label, item in self._iter_bss_items(bss_schema or {}):
+            norm = self._normalize_bss_item(item)
+            if norm.get("cancelled") is True:
+                continue
+
+            fam = (self._bss_label_type(label) or "").upper()
+            if fam not in RULES:
+                continue
+
+            definition = norm.get("definition") or ""
+            if fam == "A":
+                segs = {"notes": definition.strip()}
+            else:
+                segs_raw = self._split_definition_segments(definition)
+                segs = {k.lower(): (v or "").strip() for k, v in (segs_raw or {}).items()}
+
+            required = REQUIRED.get(fam, set())
+
+            is_complete = all((segs.get(k) or "").strip() for k in required)
+            if not is_complete:
+                continue
+
+            stats[fam]["ce"] += 1
+
+            # special rule for A: track per-example notes length
+            if fam == "A":
+                notes_len = len(segs.get("notes", ""))
+                cur_min = stats[fam]["min_notes_len"]
+                stats[fam]["min_notes_len"] = notes_len if cur_min is None else min(cur_min, notes_len)
+
+            # char sums only across CE (for non-A thresholds)
+            for seg_name, seg_body in segs.items():
+                if not seg_body:
+                    continue
+                prev = stats[fam]["chars"].get(seg_name, 0)
+                stats[fam]["chars"][seg_name] = prev + len(seg_body)
+
+        def family_is_sufficient(fam: str) -> bool:
+            rule = RULES[fam]
+            # Family A: at least 1 complete example and EACH notes field >= 1000 chars
+            if fam == "A":
+                if stats[fam]["ce"] < 1:
+                    return False
+                min_len = stats[fam].get("min_notes_len")
+                if min_len is None or min_len < 1000:
+                    return False
+                return True
+
+            if stats[fam]["ce"] < rule["min_ce"]:
+                return False
+            for seg, min_chars in (rule["min_chars"] or {}).items():
+                if stats[fam]["chars"].get(seg, 0) < int(min_chars):
+                    return False
+            return True
+
+        out: dict[str, str] = {}
+
+        for fam in RULES.keys():
+            key = f"example_{fam}"
+            out[key] = "" if family_is_sufficient(fam) else (BSS_PROMPT_EXAMPLES.get(fam) or "")
+        return out
+
+    def _bss_allowed_segments_for_type(self, label_type: str) -> set[str]:
+        """
+        Allowed *definition* segments per label family, plus open_items / ask_log for all.
+        Keys are lowercase.
+        """
+        lt = (label_type or "").upper()
+        base_map = {
+            "A":    ["notes"],
+            "UC":   ["definition", "flow", "notes"],
+            "PROC": ["definition", "flow", "snippets", "notes"],
+            "COMP": ["definition", "kind", "notes"],
+            "ROLE": ["definition", "notes"],
+            "UI":   ["definition", "snippets", "notes"],
+            "ENT":  ["definition", "contract", "notes"],
+            "INT":  ["definition", "notes"],
+            "API":  ["definition", "contract", "notes"],
+            "NFR":  ["definition", "notes"],
+        }
+        allowed = {s.lower() for s in base_map.get(lt, [])}
+        # Always allowed as separate fields
+        allowed.update({"open_items", "ask_log"})
+        return allowed
+
+
     def _bss_section_for_label(self, label: str) -> str | None:
         t = self._bss_label_type(label)
         if not t:
@@ -639,6 +937,8 @@ Thanks :)
         out["dependencies"] = self._coerce_field_to_str(out.get("dependencies"))
         out["dependants"] = self._coerce_field_to_str(out.get("dependants"))
 
+
+
         return out
 
     def _bss_label_sort_key(self, label: str):
@@ -682,37 +982,51 @@ Thanks :)
 
         return ledger
 
-    def _extract_reference_labels_from_definition(self, definition: str) -> list[str]:
-        if not isinstance(definition, str) or not definition.strip():
+
+    def _extract_reference_labels_from_definition(self, definition: str, open_items: str = "") -> list[str]:
+        """
+        Extract referenced labels from the item's free-text fields (definition + open_items).
+        This function **must never** return None.
+        """
+        if not isinstance(definition, str):
+            definition = "" if definition is None else str(definition)
+        if not isinstance(open_items, str):
+            open_items = "" if open_items is None else str(open_items)
+
+        text = f"{definition}\n{open_items}"
+
+        label_pattern = re.compile(
+            r"\b("
+            r"A\d+_[A-Z0-9_]+"
+            r"|(?:UC|PROC|COMP|ROLE|UI|ENT|INT|API|NFR)-?\d+_[A-Z0-9_]+"
+            r")\b",
+            flags=re.IGNORECASE,
+        )
+
+        # findall always returns a list, but we also guard with `or []`
+        found = label_pattern.findall(text)
+        if not found:
             return []
 
-        m = re.search(r"(^|\|)\s*References\s*:\s*", definition, flags=re.IGNORECASE)
-        if not m:
-            return []
-
-        tail = definition[m.end():]
-        bar_i = tail.find("|")
-        refs_segment = tail[:bar_i] if bar_i >= 0 else tail
-
+        # keep original spelling; de-dupe case-insensitively
+        seen: set[str] = set()
         out: list[str] = []
-        for name, inner in re.findall(r"([A-Za-z]+)\s*=\s*\[([^\]]*)\]", refs_segment):
-            parts = [p.strip() for p in inner.split(",")]
-            for p in parts:
-                if not p:
-                    continue
-                if len(p) >= 2 and p[0] == p[-1] and p[0] in ("'", '"'):
-                    p = p[1:-1].strip()
-                if self._is_bss_label(p):
-                    out.append(p)
 
-        # de-dupe, preserve order
-        seen = set()
-        deduped = []
-        for x in out:
-            if x not in seen:
-                seen.add(x)
-                deduped.append(x)
-        return deduped
+        for raw in found:
+            label = raw.strip()
+            if not label:
+                continue
+            if not self._is_bss_label(label):
+                continue
+
+            key = label.upper()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(label)
+
+        return out
+
 
 
     def _recompute_bss_dependency_fields(self, bss_schema: dict) -> dict:
@@ -743,30 +1057,56 @@ Thanks :)
                 label_types[label] = t
 
         all_labels = set(flat.keys())
+        # Map for case-insensitive canonicalization: "ROLE-1_CUSTOMER" -> "ROLE-1_Customer"
+        canonical_by_upper = {lbl.upper(): lbl for lbl in all_labels}
 
         def can_have_child(parent: str, child: str) -> bool:
             pt = label_types.get(parent)
             ct = label_types.get(child)
             return bool(pt and ct and ct in allowed_deps.get(pt, set()))
 
-        # 2) collect refs per label + track missing refs
+        # 2) collect refs per label
+        #    - from free-text (definition + open_items)
+        #    - plus any explicit user_defined_relationships
         refs_by_label: dict[str, list[str]] = {}
-        missing_deps: dict[str, set[str]] = {lbl: set() for lbl in flat.keys()}
 
         for label, item in flat.items():
-            refs = self._extract_reference_labels_from_definition(
-                (item.get("definition") or "")
+            refs_text = self._extract_reference_labels_from_definition(
+                (item.get("definition") or ""),
+                (item.get("open_items") or ""),
             )
-            resolved: list[str] = []
-            for r in refs:
+            refs_udr = self._extract_reference_labels_from_definition(
+                (item.get("user_defined_relationships") or "")
+            )
+
+            # Union + preserve order: textual refs first, then user-defined
+            seen_local: set[str] = set()
+            refs_all: list[str] = []
+            for r in refs_text + refs_udr:
                 r = (r or "").strip()
-                if not r or r == label:
+                if not r:
                     continue
-                if r in all_labels:
-                    resolved.append(r)
-                else:
-                    # referenced label not in schema -> keep as a dependency of label
-                    missing_deps[label].add(r)
+                if r in seen_local:
+                    continue
+                seen_local.add(r)
+                refs_all.append(r)
+
+            resolved: list[str] = []
+            for r in refs_all:
+                if not r:
+                    continue
+                # avoid self-dependency (case-insensitive)
+                if r.upper() == label.upper():
+                    continue
+
+                # Map to canonical label if it exists in the schema
+                canon = canonical_by_upper.get(r.upper())
+                if not canon:
+                    # no such item in the schema → ignore
+                    continue
+
+                resolved.append(canon)
+
             refs_by_label[label] = resolved
 
         # 3) build set of unordered pairs {A,B} for existing labels
@@ -806,25 +1146,21 @@ Thanks :)
 
             children[parent].add(child)
 
-        # 5) add missing referenced labels so refs never disappear
-        for label, miss in missing_deps.items():
-            children[label].update(miss)
-
-        # 6) compute parents (dependants) as reverse of children
+        # 5) compute parents (dependants) as reverse of children
         parents: dict[str, set[str]] = {lbl: set() for lbl in flat.keys()}
         for p, cs in children.items():
             for c in cs:
                 if c in parents:
                     parents[c].add(p)
 
-        # 7) write CSV fields
+        # 6) write CSV fields
         for label in flat.keys():
             deps_sorted = sorted(children[label], key=self._bss_label_sort_key)
             depants_sorted = sorted(parents[label], key=self._bss_label_sort_key)
             flat[label]["dependencies"] = ",".join(deps_sorted)
             flat[label]["dependants"] = ",".join(depants_sorted)
 
-        # 8) re-pack into sections
+        # 7) re-pack into sections
         out: dict[str, dict] = {}
         for section in self._bss_section_order():
             out[section] = {}
@@ -975,9 +1311,13 @@ Thanks :)
             norm = self._normalize_bss_item(item)
             if norm.get("cancelled") is True:
                 continue
-            refs = self._extract_reference_labels_from_definition(norm.get("definition", ""))
+            refs = self._extract_reference_labels_from_definition(
+                norm.get("definition", ""),
+                norm.get("open_items", ""),
+            )
             if any(r in labels for r in refs):
                 return True
+        return False
 
     def _remove_labels_from_references_segment(self, definition: str, labels_to_remove: set[str]) -> str:
         """

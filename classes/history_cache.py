@@ -5,7 +5,7 @@ from langchain_community.chat_message_histories.in_memory import ChatMessageHist
 from langchain_core.messages import HumanMessage, AIMessage
 
 from classes.entities import Base
-from classes.google_helpers import get_db_engine
+from classes.GCConnection_hlpr import GCConnection
 
 from sqlalchemy.orm import sessionmaker
 
@@ -24,9 +24,6 @@ class HistoryCache:
         self._lock = threading.Lock()
         # project_id -> {"history": ChatMessageHistory, "expires_at": float}
         self._items: dict[str, dict[str, object]] = {}
-        self.engine = get_db_engine()
-        Base.metadata.create_all(self.engine)
-        self.Session = sessionmaker(bind=self.engine)
 
     def _approx_tokens(self, text: str) -> int:
         return max(1, len(text) // 4)

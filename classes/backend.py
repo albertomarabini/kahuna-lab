@@ -1,6 +1,5 @@
 # classes/backend.py
 
-from decimal import Decimal
 import os
 import json
 import re
@@ -12,21 +11,18 @@ import contextvars
 from sqlalchemy.orm import sessionmaker
 
 from classes.entities import Base, Job, Project
-from classes.google_helpers import IS_LOCAL_DB, create_session_factory
-from classes.history_cache import GLOBAL_HISTORY_CACHE, GLOBAL_BSS_HISTORY_CACHE
+from classes.GCConnection_hlpr import GCConnection
+from classes.history_cache import GLOBAL_BSS_HISTORY_CACHE
 from classes.idempotency_cache import IDEMPOTENCY_CACHE
 from classes.pending_charge_recorder import record_pending_charge
 
 
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from classes.chat_prompts import BSS_PROMPT
-from classes.ingestion_prompts import BSS_UC_EXTRACTOR_PROMPT, UC_COVERAGE_AUDITOR_PROMPT
+from classes.ingestion_prompts import BSS_CANONICALIZER_PROMPT, BSS_UC_EXTRACTOR_PROMPT, UC_COVERAGE_AUDITOR_PROMPT, epistemic_2_rules
 
-CHAT_PROMPT = ""
-SCHEMA_UPDATE_PROMPT = ""
 
 from classes.utils import Utils
-from classes.schema_manager import SchemaManager
 
 from dotenv import load_dotenv
 
@@ -41,7 +37,7 @@ _job_ctx_var = contextvars.ContextVar("job_ctx", default=None)
 
 class Backend(Utils):
     def __init__(self):
-        self.SessionFactory = create_session_factory()
+        self.SessionFactory = GCConnection().build_db_session_factory()
 
         # Initialize default LLMs (used as fallback only)
         try:
@@ -109,17 +105,14 @@ class Backend(Utils):
             elif request_type == "edit_bss_document":
                 response_data["data"] = self.handle_edit_bss_document(project_id, payload)
 
-            elif request_type == "chat":
-                response_data["data"] = self.handle_chat(project_id, payload)
+            elif request_type == "edit_bss_node":
+                response_data["data"] = self.handle_edit_bss_node(project_id, payload)
 
-            elif request_type == "add_comment":
-                response_data["data"] = self.handle_comment(project_id, payload)
+            elif request_type == "create_bss_relationship":
+                response_data["data"] = self.handle_create_relationship(project_id, payload)
 
-            elif request_type == "delete_node":
-                response_data["data"] = self.handle_delete_node(project_id, payload)
-
-            elif request_type == "update_node" or request_type == "add_node":
-                response_data["data"] = self.handle_direct_schema_command(project_id, payload)
+            elif request_type == "remove_bss_relationship":
+                response_data["data"] = self.handle_remove_bss_relationship(project_id, payload)
 
             elif request_type == "ingestion":
                 response_data["data"] = self.handle_ingestion(project_id, payload)
@@ -142,65 +135,6 @@ class Backend(Utils):
             traceback.print_exc()
             raise
 
-
-    def _run_schema_update_with_retry(
-        self,
-        schema_manager,
-        llm,
-        current_schema,
-        combined_instruction: str,
-        max_retries: int = 3
-    ):
-        current_schema_json = json.dumps(current_schema)
-        last_discrepancies = []
-        last_llm_response = ""
-
-        for attempt in range(1, max_retries + 1):
-            if last_discrepancies:
-                retry_instruction = f"""
-{combined_instruction}
-
-VALIDATION FEEDBACK FROM EXECUTION ENGINE (attempt {attempt - 1}):
-These discrepancies were found when applying your previous commands:
-{json.dumps(last_discrepancies, indent=2)}
-
-YOUR PREVIOUS COMMAND JSON (for reference):
-{last_llm_response}
-
-You must fix the problems above and propose a corrected set of commands.
-"""
-            else:
-                retry_instruction = combined_instruction
-
-            schema_prompt = self.unsafe_string_format(
-                SCHEMA_UPDATE_PROMPT,
-                current_schema_json=current_schema_json,
-                validation_schema_json=json.dumps(self.requirements_schema, indent=2),
-                combined_instruction=retry_instruction
-            )
-
-            if llm:
-                llm_resp_obj = llm.invoke(schema_prompt)
-            else:
-                llm_resp_obj = '{"insert": [], "update": [], "delete": []}'
-
-            if isinstance(llm_resp_obj, str):
-                llm_response = llm_resp_obj
-            else:
-                llm_response = getattr(llm_resp_obj, "content", str(llm_resp_obj))
-
-            last_llm_response = llm_response
-
-            updated_schema_str, last_discrepancies, _ = schema_manager.apply_commands_to_schema(
-                current_schema_json, llm_response, self.requirements_schema
-            )
-
-            if not last_discrepancies:
-                updated_schema = json.loads(updated_schema_str)
-                return updated_schema, []
-
-        raise Exception(f"Schema update failed after {max_retries} attempts. Discrepancies: {last_discrepancies}")
-
     # -----------------------
     # Handlers
     # -----------------------
@@ -218,11 +152,14 @@ You must fix the problems above and propose a corrected set of commands.
         registry_ledger = self._build_registry_ledger(current_bss)
         registry_ledger_json = json.dumps(registry_ledger, indent=2)
 
+        example_kwargs = self._bss_example_kwargs(current_bss)
+
         prompt = self.unsafe_string_format(
             BSS_PROMPT,
             USER_QUESTION=user_text,
             CURRENT_DOCUMENT=current_document,
             REGISTRY_LEDGER=registry_ledger_json,
+            **example_kwargs,
         )
 
         print("===============Prompt\n\n" + prompt)
@@ -232,8 +169,6 @@ You must fix the problems above and propose a corrected set of commands.
             messages_for_llm.append(HumanMessage(content=prompt))
             raw = chat_llm.invoke(messages_for_llm)
             raw = getattr(raw, "content", str(raw))
-        else:
-            raw = 'NEXT_QUESTION:"Mock question?"'
 
         print("===============Server Response\n\n" + raw)
 
@@ -373,11 +308,269 @@ You must fix the problems above and propose a corrected set of commands.
         }
 
 
+    def handle_edit_bss_node(self, project_id: str, payload: dict) -> dict:
+        """
+        Edit a single BSS node's definition segments and/or status.
+
+        Payload:
+          {
+            "label": "UC-1_Browse_Catalog",
+            "status": "draft",        # optional
+            "segments": { ... }       # optional; full definition if present
+          }
+        """
+        payload = payload or {}
+        label = (payload.get("label") or "").strip()
+        if not label or not self._is_bss_label(label):
+            raise ValueError(f"Unknown or missing BSS label: {label}")
+
+        segments = payload.get("segments")
+        if segments is not None and not isinstance(segments, dict):
+            raise ValueError("edit_bss_node payload.segments must be an object when present")
+
+        new_status = (payload.get("status") or "").strip() or None
+
+        current_bss = self.load_bss_schema(project_id)
+        if not isinstance(current_bss, dict):
+            current_bss = {}
+
+        section = self._bss_section_for_label(label)
+        if not section:
+            raise ValueError(f"Could not map label to section: {label}")
+
+        if label not in (current_bss.get(section) or {}):
+            raise ValueError(f"Label does not exist in schema: {label}")
+
+        existing = self._normalize_bss_item(current_bss[section].get(label))
+        old_status = (existing.get("status") or "").strip().lower()
+
+        # 1) Rebuild definition from provided segments (if any)
+        if segments is not None:
+            segs_norm: dict[str, str] = {}
+            for k, v in segments.items():
+                key = (k or "").strip().lower()
+                if not key:
+                    continue
+                val = "" if v is None else str(v)
+                segs_norm[key] = val.strip()
+
+            preferred_order = [
+                "definition",
+                "flow",
+                "notes",
+                "kind",
+                "contract",
+                "contracts",
+                "snippets",
+                "outcomes",
+                "decision",
+            ]
+
+            parts: list[str] = []
+            used: set[str] = set()
+
+            for key in preferred_order:
+                val = segs_norm.get(key, "")
+                if not val.strip():
+                    continue
+                used.add(key)
+                header = key.capitalize()
+                parts.append(f"{header}: {val}")
+
+            for key in sorted(segs_norm.keys()):
+                if key in used:
+                    continue
+                val = segs_norm.get(key, "")
+                if not val.strip():
+                    continue
+                header = key.capitalize()
+                parts.append(f"{header}: {val}")
+
+            existing["definition"] = " | ".join(parts) if parts else ""
+
+        # 2) Status logic
+        if new_status is not None:
+            existing["status"] = new_status
+        else:
+            # User edited definition but did not explicitly set status:
+            # if it was draft, promote to partial.
+            if segments is not None and old_status == "draft":
+                existing["status"] = "partial"
+
+        existing["cancelled"] = False
+        current_bss.setdefault(section, {})
+        current_bss[section][label] = existing
+
+        # 3) Recompute graph with existing status semantics
+        updated_bss = self._recompute_bss_dependency_fields(current_bss)
+        self.save_bss_schema(project_id, updated_bss)
+
+        # UI does not care about the response body
+        return {}
+
+
+    def handle_create_relationship(self, project_id: str, payload: dict) -> dict:
+        """
+        Create a user-defined relationship between two existing BSS labels.
+
+        Semantics: source_label depends on target_label.
+
+        Accepted payload keys:
+        - from_label / from
+        - to_label   / to
+        """
+        payload = payload or {}
+        src = (payload.get("from_label") or payload.get("from") or "").strip()
+        dst = (payload.get("to_label") or payload.get("to") or "").strip()
+
+        if not src or not dst:
+            raise ValueError(
+                "create_relationship payload must include 'from_label'/'from' and 'to_label'/'to'"
+            )
+        if not self._is_bss_label(src):
+            raise ValueError(f"Invalid source label: {src}")
+        if not self._is_bss_label(dst):
+            raise ValueError(f"Invalid target label: {dst}")
+
+        current_bss = self.load_bss_schema(project_id)
+        if not isinstance(current_bss, dict):
+            current_bss = {}
+
+        # Ensure both nodes exist in the current schema
+        existing_labels = {label for label, _ in self._iter_bss_items(current_bss)}
+        if src not in existing_labels:
+            raise ValueError(f"Source label does not exist in schema: {src}")
+        if dst not in existing_labels:
+            raise ValueError(f"Target label does not exist in schema: {dst}")
+
+        src_section = self._bss_section_for_label(src)
+        if not src_section:
+            raise ValueError(f"Could not map source label to section: {src}")
+
+        current_bss.setdefault(src_section, {})
+        src_item = self._normalize_bss_item(current_bss[src_section].get(src))
+
+        # Normalize & extend user_defined_relationships
+        udr_raw = (src_item.get("user_defined_relationships") or "").strip()
+        udr_labels = self._extract_reference_labels_from_definition(udr_raw)
+
+        dst_norm = dst.strip()
+        if dst_norm not in udr_labels:
+            udr_labels.append(dst_norm)
+
+        udr_labels_sorted = sorted(udr_labels, key=self._bss_label_sort_key)
+        src_item["user_defined_relationships"] = ",".join(udr_labels_sorted)
+
+        current_bss[src_section][src] = src_item
+
+        # Recompute dependency/dependant fields to include this relationship
+        updated_bss = self._recompute_bss_dependency_fields(current_bss)
+        self.save_bss_schema(project_id, updated_bss)
+
+        # Return only the two affected nodes with their edge fields,
+        # to avoid sending the whole document back.
+        def _extract_edges(label: str) -> dict:
+            section = self._bss_section_for_label(label)
+            if not section:
+                raise ValueError(f"Could not map label to section after update: {label}")
+            item = self._normalize_bss_item(
+                (updated_bss.get(section) or {}).get(label) or {}
+            )
+            return {
+                "label": label,
+                "dependencies": item.get("dependencies", ""),
+                "dependants": item.get("dependants", ""),
+            }
+
+        return {
+            "from": _extract_edges(src),
+            "to": _extract_edges(dst),
+        }
+
+
+    def handle_remove_bss_relationship(self, project_id: str, payload: dict) -> dict:
+        """
+        Remove a user-defined relationship between two existing BSS labels.
+
+        Semantics: remove the edge 'source_label depends on target_label'.
+        """
+        payload = payload or {}
+        src = (payload.get("from_label") or payload.get("from") or "").strip()
+        dst = (payload.get("to_label") or payload.get("to") or "").strip()
+
+        if not src or not dst:
+            raise ValueError(
+                "remove_bss_relationship payload must include 'from_label'/'from' and 'to_label'/'to'"
+            )
+        if not self._is_bss_label(src):
+            raise ValueError(f"Invalid source label: {src}")
+        if not self._is_bss_label(dst):
+            raise ValueError(f"Invalid target label: {dst}")
+
+        current_bss = self.load_bss_schema(project_id)
+        if not isinstance(current_bss, dict):
+            current_bss = {}
+
+        existing_labels = {label for label, _ in self._iter_bss_items(current_bss)}
+        if src not in existing_labels:
+            raise ValueError(f"Source label does not exist in schema: {src}")
+        if dst not in existing_labels:
+            raise ValueError(f"Target label does not exist in schema: {dst}")
+
+        src_section = self._bss_section_for_label(src)
+        dst_section = self._bss_section_for_label(dst)
+        if not src_section or not dst_section:
+            raise ValueError(f"Could not map labels to sections: {src}, {dst}")
+
+        current_bss.setdefault(src_section, {})
+        current_bss.setdefault(dst_section, {})
+
+        src_item = self._normalize_bss_item(current_bss[src_section].get(src))
+        dst_item = self._normalize_bss_item(current_bss[dst_section].get(dst))
+
+        # Remove dst from src.dependencies
+        deps_raw = (src_item.get("dependencies") or "").strip()
+        deps_labels = self._extract_reference_labels_from_definition(deps_raw)
+
+        deps_filtered = [d for d in deps_labels if d.upper() != dst.upper()]
+        src_item["dependencies"] = ",".join(deps_filtered)
+
+        # Flip draft -> partial for both nodes if touched by user
+        if (src_item.get("status") or "").strip().lower() == "draft":
+            src_item["status"] = "partial"
+        if (dst_item.get("status") or "").strip().lower() == "draft":
+            dst_item["status"] = "partial"
+
+        current_bss[src_section][src] = src_item
+        current_bss[dst_section][dst] = dst_item
+
+        updated_bss = self._recompute_bss_dependency_fields(current_bss)
+        self.save_bss_schema(project_id, updated_bss)
+
+        def _extract_node(label: str) -> dict:
+            section = self._bss_section_for_label(label)
+            item = self._normalize_bss_item(
+                (updated_bss.get(section) or {}).get(label) or {}
+            )
+            return {
+                "label": label,
+                "status": item.get("status", ""),
+                "dependencies": item.get("dependencies", ""),
+                "dependants": item.get("dependants", ""),
+            }
+
+        return {
+            "from": _extract_node(src),
+            "to": _extract_node(dst),
+        }
+
+
+
     def _apply_bss_slot_updates(self, current_bss: dict, slot_updates: dict) -> dict:
         if not isinstance(current_bss, dict):
             current_bss = {}
 
-        for label, obj in (slot_updates or {}).items():
+        for label, patch in (slot_updates or {}).items():
             if not self._is_bss_label(label):
                 continue
 
@@ -385,159 +578,109 @@ You must fix the problems above and propose a corrected set of commands.
             if not section:
                 continue
 
-            norm = self._normalize_bss_item(obj)
-
-            # If cancelled -> physically remove
-            if norm.get("cancelled") is True:
+            # Delete / cancel
+            if isinstance(patch, dict) and patch.get("cancelled") is True:
                 if section in current_bss and isinstance(current_bss[section], dict):
                     current_bss[section].pop(label, None)
                     if not current_bss[section]:
                         current_bss.pop(section, None)
                 continue
 
+            if not isinstance(patch, dict):
+                continue
+
             current_bss.setdefault(section, {})
-            current_bss[section][label] = norm
+
+            # Start from existing canonical representation
+            existing_raw = current_bss[section].get(label)
+            is_new = existing_raw is None
+            existing = self._normalize_bss_item(existing_raw)
+
+            # Status:
+            # - brand new items are always created as 'draft'
+            # - for existing items we honor an explicit status from the patch
+            status = patch.get("status")
+            if is_new:
+                existing["status"] = "draft"
+            elif isinstance(status, str) and status.strip():
+                existing["status"] = status.strip()
+
+            # Split existing definition into segments
+            existing_def = existing.get("definition") or ""
+            segments_current = self._split_definition_segments(existing_def)
+
+            # Overlay new definition-related segments (definition, flow, notes, kind, etc.)
+            new_segments = patch.get("segments") or {}
+            if isinstance(new_segments, dict):
+                for seg_name, seg_body in new_segments.items():
+                    key = seg_name.lower()
+                    if not isinstance(seg_body, str):
+                        continue
+                    segments_current[key] = seg_body
+
+            # Log missing required segments for this label type
+            self._log_missing_required_segments(label, segments_current)
+
+            # Rebuild definition from segments_current
+            preferred_order = [
+                "definition",
+                "flow",
+                "notes",
+                "kind",
+                "contract",
+                "contracts",
+                "snippets",
+                "outcomes",
+                "decision",
+            ]
+
+            pieces: list[str] = []
+            used: set[str] = set()
+
+            for key in preferred_order:
+                val = (segments_current.get(key) or "").strip()
+                if not val:
+                    continue
+                used.add(key)
+                header = key.capitalize()
+                pieces.append(f"{header}: {val}")
+
+            # Any extra segment names not in preferred_order
+            for key in sorted(segments_current.keys()):
+                if key in used:
+                    continue
+                val = (segments_current.get(key) or "").strip()
+                if not val:
+                    continue
+                header = key.capitalize()
+                pieces.append(f"{header}: {val}")
+
+            if pieces:
+                existing["definition"] = " | ".join(pieces)
+            # else keep existing["definition"] as-is
+
+            # open_items: full replacement if provided
+            if "open_items" in patch:
+                oi = patch.get("open_items") or ""
+                existing["open_items"] = oi
+
+            # ask_log: append with '; ' separator if provided
+            ask_append = (patch.get("ask_log_append") or "").strip()
+            if ask_append:
+                prev = (existing.get("ask_log") or "").strip()
+                if prev:
+                    existing["ask_log"] = f"{prev}; {ask_append}"
+                else:
+                    existing["ask_log"] = ask_append
+
+            # Never persist deleted; cancelled is the only supported boolean here
+            existing["cancelled"] = False
+
+            current_bss[section][label] = existing
 
         return current_bss
 
-    def handle_chat(self, project_id: str, payload):
-        payload = payload or {}
-        message = (payload or {}).get("text", "") or ""
 
-        llm, chat_llm = self._build_llms_for_payload(payload)
-
-        current_schema = self.load_project(project_id)
-        schema_manager = SchemaManager(llm)
-
-        try:
-            chat_prompt = self.unsafe_string_format(
-                CHAT_PROMPT,
-                current_schema_json=json.dumps(current_schema, indent=2),
-                validation_schema_json=json.dumps(self.requirements_schema, indent=2),
-                user_message=message
-            )
-
-            if chat_llm:
-                messages_for_llm = GLOBAL_HISTORY_CACHE.snapshot(project_id)
-                messages_for_llm.append(HumanMessage(content=chat_prompt))
-                raw = chat_llm.invoke(messages_for_llm)
-            else:
-                raw = '{"assistant_message": "Mock reply", "schema_change_description": "", "updated_project_description": ""}'
-
-            raw = getattr(raw, "content", str(raw))
-
-            assistant_message, schema_change_description, updated_project_description = "", "", ""
-            try:
-                chat_obj = self.load_fault_tolerant_json(raw, llm=llm)
-                assistant_message = self._coerce_field_to_str((chat_obj.get("assistant_message") or "")).strip()
-                schema_change_description = self._coerce_field_to_str((chat_obj.get("schema_change_description") or "")).strip()
-                updated_project_description = self._coerce_field_to_str((chat_obj.get("updated_project_description") or "")).strip()
-                logger.info(f"Schema Changes Required: {schema_change_description}")
-            except Exception as e:
-                logger.error(f"Error While Processing Chat Message\n{e}\n{raw}")
-
-            if assistant_message:
-                GLOBAL_HISTORY_CACHE.append_turn(project_id, message, assistant_message)
-            else:
-                raise Exception("No assistant_message parsed from LLM response")
-
-            updated_schema = current_schema
-            discrepancies = []
-
-            if schema_change_description or updated_project_description:
-                combined_instruction = f"""
-Schema change description (natural language plan of changes):
-{schema_change_description or "(none)"}
-
-Updated project description suggestion:
-{updated_project_description or "(none)"}
-
-IMPORTANT FOR THIS STEP:
-- Implement the schema_change_description against the current schema.
-- If updated_project_description is not empty, you MUST set $.Project.description
-  exactly to that string in the mandatory update for $.Project.
-"""
-                updated_schema, discrepancies = self._run_schema_update_with_retry(
-                    schema_manager=schema_manager,
-                    llm=llm,
-                    current_schema=current_schema,
-                    combined_instruction=combined_instruction,
-                    max_retries=3,
-                )
-                self.save_project(project_id, updated_schema)
-
-            return {
-                "bot_message": assistant_message,
-                "updated_schema": updated_schema,
-                "discrepancies": discrepancies,
-                "schema_change_description": schema_change_description,
-                "updated_project_description": updated_project_description
-            }
-        except Exception as e:
-            logger.warning(f"Error while executing a prompt {e}")
-            return self._safe_error_response(current_schema, e)
-
-    def handle_comment(self, project_id: str, payload):
-        payload = payload or {}
-        path = payload.get("path")
-        comment = payload.get("comment")
-
-        current_schema = self.load_project(project_id)
-
-        llm, _ = self._build_llms_for_payload(payload)
-        schema_manager = SchemaManager(llm)
-
-        try:
-            current_item = schema_manager.get_fuzzy_nested_node(
-                current_schema,
-                (path or "").split(".")
-            )
-
-            combined_instruction = f"""
-A user added a comment to a specific item in the requirements schema.
-
-Item path (dot-notation as used in the UI): {path}
-
-User comment:
-{comment}
-
-Current item content (as currently stored in the schema):
-{json.dumps(current_item, indent=2)}
-
-Your job:
-
-- Interpret the user comment as a request to adjust ONLY this item
-  (and any strictly necessary, directly related sub-entities).
-- Propose insert/update/delete operations that:
-  - keep the schema valid against the Validation Rules,
-  - preserve all existing data structures, file structures, data schemas,
-    and code snippets VERBATIM unless the comment clearly asks to change them,
-  - update this item's description/body. so that it reflects
-    the intent of the comment in a detailed, implementation-oriented way.
-- Do NOT invent unrelated entities or groups.
-
-MANDATORY:
-- As always, include the mandatory update operation for $.Project that refreshes
-  $.Project.description to reflect the change introduced by this comment.
-"""
-            updated_schema, discrepancies = self._run_schema_update_with_retry(
-                schema_manager=schema_manager,
-                llm=llm,
-                current_schema=current_schema,
-                combined_instruction=combined_instruction,
-                max_retries=3,
-            )
-
-            self.save_project(project_id, updated_schema)
-
-            return {
-                "bot_message": f"I've processed your comment on {path}.",
-                "updated_schema": updated_schema,
-                "discrepancies": discrepancies,
-            }
-
-        except Exception as e:
-            return self._safe_error_response(current_schema, e)
 
     # !##############################################
     # ! Handle Jobs
@@ -549,12 +692,6 @@ MANDATORY:
         Guards so that a user / project cannot have more than one active job
         (QUEUED or RUNNING) at a time.
         """
-        if IS_LOCAL_DB:
-            return {
-                "job_id": None,
-                "state": "disabled_in_local_mode",
-                "status": "Remote worker queue is disabled when using local DB.",
-            }
 
         payload = payload or {}
 
@@ -637,34 +774,33 @@ MANDATORY:
         if not prd:
             raise ValueError("ingestion payload.prd is required (non-empty string)")
 
-        self.emit("ingestion_status", {"pct": 0, "stage": "start", "note": "Starting ingestion"})
-
         llm, _ = self._build_llms_for_payload(payload)  # direct (non-chat) calls only
         if not llm:
             raise RuntimeError("No LLM available for ingestion")
 
-        self.emit("ingestion_status", {"pct": 10, "stage": "load", "note": "Loading project state"})
+        self.emit("ingestion_status", {"note": "Starting ingestion, please wait"})
         _ = self.load_project(project_id)  # currently unused, but keeps symmetry with other flows
 
-        max_attempts = 3
+        max_attempts = 2
         report = "None"
 
         usecases_by_label = {}
         connected = {}  # label -> set(responsibility_str)
         last_completion = None
         last_missing_block = ""
+        attempt = 0
+        prev_completion_pct = 0
 
-        for attempt in range(1, max_attempts + 1):
-            self.emit("ingestion_status", {"pct": 20, "stage": "extract", "note": f"Extracting use cases (attempt {attempt}/{max_attempts})"})
-
+        while True:
             prompt1 = self.unsafe_string_format(
                 BSS_UC_EXTRACTOR_PROMPT,
                 prd=prd,
                 report=report or "None",
             )
+            print("===============Prompt\n\n" + prompt1)
             raw = llm.invoke(prompt1)
             # raw = raw if isinstance(raw, str) else getattr(raw, "content", str(raw))
-
+            print("===============Server Response\n\n" + raw)
             parsed_ucs, parsed_connected = self._ingestion_parse_extractor_output(raw)
 
             # merge usecases
@@ -674,6 +810,8 @@ MANDATORY:
                     continue
                 prev = usecases_by_label.get(label) or {}
                 usecases_by_label[label] = self._ingestion_merge_usecase(prev, uc)
+
+            self.emit("ingestion_status", {"note": f"Parsed {len(parsed_ucs)} usecase(s){' more' if len(usecases_by_label.keys()) else ''}"})
 
             # merge connected responsibilities
             for item in parsed_connected:
@@ -686,9 +824,6 @@ MANDATORY:
                     if r2:
                         s.add(r2)
 
-            self.emit("ingestion_status", {"pct": 45, "stage": "parsed", "note": f"Parsed {len(parsed_ucs)} use cases (total {len(usecases_by_label)})"})
-
-            # self.emit("ingestion_status", {"pct": 55, "stage": "audit", "note": f"Auditing coverage (attempt {attempt}/{max_attempts})"})
             ucs_raw = self._ingestion_concat_uc_raw(usecases_by_label)
             prompt2 = self.unsafe_string_format(
                 UC_COVERAGE_AUDITOR_PROMPT,
@@ -702,31 +837,404 @@ MANDATORY:
             last_completion = completion_pct
             last_missing_block = missing_block or ""
 
-            self.emit("ingestion_status", {"pct": 70, "stage": "audit_done", "note": f"Coverage: {completion_pct if completion_pct is not None else 'unknown'}%"})
-
-            if completion_pct is not None and completion_pct >= 95:
+            self.emit("ingestion_status", {"note": f"Total Coverage: {int(completion_pct) if completion_pct is not None else 'unknown'}%"})
+            if completion_pct is None:
+                completion_pct = prev_completion_pct
+            if completion_pct >= 99:
                 break
-
+            if completion_pct <= prev_completion_pct:
+                attempt+=1
+            else:
+                attempt=0
+            if attempt == max_attempts:
+                break
+            prev_completion_pct = completion_pct
             report = self._ingestion_build_report(usecases_by_label, connected, last_missing_block)
-            self.emit("ingestion_status", {"pct": 80, "stage": "reflect", "note": "Preparing refinement report for next attempt"})
-
-        self.emit("ingestion_status", {"pct": 100, "stage": "done", "note": "Ingestion completed"})
 
         # finalize payloads
         usecases = self._ingestion_sorted_usecases(usecases_by_label)
         connected_items = self._ingestion_sorted_connected_items(connected)
 
-        return {
-            "bot_message": "Done",
-            "completion_pct": last_completion,
-            "missing_use_cases": last_missing_block,
-            "usecases": usecases,
-            "connected_items": connected_items,
+        # canonicalization passes per family
+        current_bss = {}  # start from empty BSS graph
+        execution_order = ["COMP", "INT", "API", "ENT", "ROLE", "UI", "PROC", "NFR", "UC", "A"]
+
+        # index non-UC connected items once
+        connected_index = {
+            (item.get("label") or "").strip(): item
+            for item in connected_items
+            if (item.get("label") or "").strip()
         }
+
+        for n, family in enumerate(execution_order):
+            # -------------------------
+            # Family-specific selection
+            # -------------------------
+            if family == "UC":
+                family_items = list(usecases)
+            elif family == "A":
+                family_items = []
+            else:
+                family_items: list[dict] = []
+                for item in connected_items:
+                    lbl = (item.get("label") or "").strip()
+                    if lbl.startswith(f"{family}-"):
+                        family_items.append(item)
+            orig_len = len(family_items)
+            while True:
+                if family == "UC":
+                    # UC family: UCs come from `usecases` (ore),
+                    # all non-UC context comes from canonical `current_bss`.
+                    if not family_items:
+                        break
+
+                    family_labels: set[str] = {
+                        (uc.get("label") or "").strip()
+                        for uc in family_items
+                        if (uc.get("label") or "").strip()
+                    }
+
+
+                    # UC canonicalization does NOT use uc_blocks as separate context,
+                    # we pass them as ITEMS_OF_FAMILY instead.
+                    uc_blocks: list[dict] = []
+
+                    # No ore related_items for UC; all related info is canonical from BSS.
+                    related_items: list[dict] = []
+                    related_items_str = "None"
+
+                    # Canonical context: entire current_bss.
+                    if current_bss:
+                        bss_context = self._bss_current_document_for_prompt(current_bss)
+                    else:
+                        bss_context = ""
+
+                    uc_blocks_str = "None"
+                    family_items_str = self._ingestion_format_uc_items(family_items)
+
+                elif family == "A":
+                    ...
+                    if current_bss:
+                        full_doc = self._bss_current_document_for_prompt(current_bss)
+                        bss_context = full_doc if full_doc.strip() else ""
+                    else:
+                        bss_context = ""
+
+                    # A-* should see canonical info only via `bss_context`,
+                    # keep RELATED_ITEMS purely for ore (none here).
+                    related_items_str = "None"
+
+                    family_items_str = """
+    In this run there is no precise ITEMS_OF_FAMILY binding.
+    Instead you will have to emit the following items:
+    A1_PROJECT_CANVAS
+    A2_TECHNOLOGICAL_INTEGRATIONS
+    A3_TECHNICAL_CONSTRAINTS
+    A4_ACCEPTANCE_CRITERIA
+
+    Based on the attached Epistemic-2 format rules
+
+    """
+
+                else:
+                    # Non-UC, non-A families: COMP / INT / API / ENT / ROLE / UI / PROC / NFR
+                    if not family_items:
+                        break
+
+                    family_labels: set[str] = {
+                        (item.get("label") or "").strip()
+                        for item in family_items
+                        if (item.get("label") or "").strip()
+                    }
+
+                    # UCs that mention any of these labels
+                    uc_blocks: list[dict] = []
+                    for uc in usecases:
+                        rel = uc.get("related_items") or []
+                        if any(lbl in family_labels for lbl in rel):
+                            uc_blocks.append(uc)
+
+                    # related_items (bidirectional) from connected_items
+                    related_labels = self._ingestion_collect_related_labels_for_family(
+                        family_labels=family_labels,
+                        connected_items=connected_items,
+                    )
+
+                    # Split related labels into:
+                    # - canonical: already synthesized in current_bss
+                    # - ore: only present in connected_items
+                    canonical_labels: set[str] = {
+                        lbl
+                        for lbl, _ in self._iter_bss_items(current_bss)
+                    }
+
+                    canonical_related_labels = {
+                        lbl for lbl in related_labels if lbl in canonical_labels
+                    }
+                    ore_related_labels = {
+                        lbl for lbl in related_labels if lbl not in canonical_labels
+                    }
+
+                    # Ore-only related_items (raw responsibilities)
+                    related_items: list[dict] = [
+                        connected_index[lbl]
+                        for lbl in sorted(ore_related_labels)
+                        if lbl in connected_index
+                    ]
+
+                    # Canonical context: subset of current_bss for this family + canonical-related labels
+                    bss_context = self._ingestion_build_bss_context_for_family(
+                        current_bss=current_bss,
+                        family_labels=family_labels,
+                        extra_labels=canonical_related_labels,
+                        uc_blocks=uc_blocks,
+                    )
+
+                    uc_blocks_str = self._ingestion_format_uc_blocks(uc_blocks)
+                    family_items_str = self._ingestion_format_items_list(family_items)
+                    related_items_str = self._ingestion_format_items_list(related_items) if related_items else "None"
+
+                # -------------------------
+                # Common canonicalizer call
+                # -------------------------
+                epistemic_2 = epistemic_2_rules.get(family) or ""
+
+                prompt3 = self.unsafe_string_format(
+                    BSS_CANONICALIZER_PROMPT,
+                    prd=prd,
+                    uc_blocks=uc_blocks_str,
+                    related_items=related_items_str,
+                    items_of_family=family_items_str,
+                    epistemic_2=epistemic_2,
+                    bss_context=bss_context or "None",
+                )
+                approx_pct = 0
+                if orig_len:
+                    done = orig_len - len(family_items)
+                    frac = done / orig_len
+                    approx_pct = int(frac * 10)
+
+                approx_pct += n * 10
+                self.emit("ingestion_status", {"note": f"Ingested items {int(approx_pct)}%"})
+                print("===============Prompt\n\n" + prompt3)
+                raw3 = llm.invoke(prompt3)
+                raw3 = raw3 if isinstance(raw3, str) else getattr(raw3, "content", str(raw3))
+                print("===============Server Response\n\n" + raw3)
+
+                slot_updates, _, malformed = self._parse_bss_output(raw3, llm=llm)
+                # if malformed:
+                #     raise ValueError(f"Canonicalizer produced malformed output for family {family}")
+                if not slot_updates:
+                    break
+                current_bss = self._apply_bss_slot_updates(current_bss, slot_updates)
+                current_bss = self._recompute_bss_dependency_fields(current_bss)
+
+                # Remove family_items that were just handled in this canonicalizer call
+                if family != "A":
+                    handled_labels = set(slot_updates.keys())
+                    prev_len = len(family_items)
+                    family_items = [
+                        item
+                        for item in family_items
+                        if (item.get("label") or "").strip() not in handled_labels
+                    ]
+                    if len(family_items) == prev_len:
+                        break
+                if not family_items:
+                    break
+
+
+        # finally persist
+        self.save_bss_schema(project_id, current_bss)
+
+        idempotency_key = record_pending_charge(
+            self.SessionFactory,
+            project_id=str(project_id),
+            amount=llm.get_accrued_cost(),
+            currency=CURRENCY,
+        )
+
+        IDEMPOTENCY_CACHE.add(idempotency_key)
+
+        return {
+            "bss_schema": self._redact_bss_schema_for_ui(current_bss),
+            "bss_labels": self._bss_labels,
+            "heartbeat": idempotency_key,
+        }
+
+
+
 
     # -----------------------
     # Ingestion helpers
     # -----------------------
+
+    def _ingestion_format_uc_items(self, ucs: list[dict]) -> str:
+        """
+        Format UC items for the canonicalizer ITEMS_OF_FAMILY slot.
+
+        Only the following are emitted per UC:
+        - label
+        - flow
+        - notes
+        - related_items (CSV)
+        """
+        lines: list[str] = []
+
+        for uc in ucs:
+            label = (uc.get("label") or "").strip()
+            if not label:
+                continue
+
+            flow = (uc.get("flow") or "").strip()
+            notes = (uc.get("notes") or "").strip()
+            related_items = [x.strip() for x in (uc.get("related_items") or []) if x and x.strip()]
+            related_csv = ", ".join(related_items) if related_items else ""
+
+            lines.append(f"{label}")
+            if flow:
+                lines.append("Flow:")
+                lines.append(flow)
+            if notes:
+                lines.append("Notes:")
+                lines.append(notes)
+            if related_csv:
+                lines.append(f"Related_items: {related_csv}")
+
+            lines.append("")  # blank line between UCs
+
+        return "\n".join(lines).strip()
+
+    def _ingestion_build_bss_context_for_family(
+        self,
+        current_bss: dict,
+        family_labels: set[str],
+        extra_labels: set[str],
+        uc_blocks: list[dict],
+    ) -> str:
+        """
+        Build a minimal BSS document (via _bss_current_document_for_prompt)
+        containing canonical items related to this family.
+
+        - canonical = already synthesized items in current_bss
+        - family_labels = labels of items we are currently canonicalizing
+        - extra_labels = other canonical labels related to this family
+        - uc_blocks = UC ore; we only use their related_items when those labels
+          already exist in current_bss
+        """
+        if not current_bss:
+            return ""
+
+        # Collect candidate labels
+        context_labels: set[str] = set()
+
+        # 1) family labels (if already canonical)
+        for lbl in family_labels:
+            lbl = (lbl or "").strip()
+            if lbl:
+                context_labels.add(lbl)
+
+        # 2) explicitly provided canonical-related labels
+        for lbl in (extra_labels or set()):
+            lbl = (lbl or "").strip()
+            if lbl:
+                context_labels.add(lbl)
+
+        # 3) labels referenced by UC blocks (only if canonical)
+        for uc in uc_blocks:
+            for lbl in (uc.get("related_items") or []):
+                lbl = (lbl or "").strip()
+                if lbl:
+                    context_labels.add(lbl)
+
+        # Only keep labels that actually exist in current_bss
+        existing_labels: set[str] = {lbl for lbl, _ in self._iter_bss_items(current_bss)}
+        context_labels &= existing_labels
+
+        if not context_labels:
+            return ""
+
+        # Extract just these labels from current_bss, preserving sections
+        subset: dict[str, dict] = {}
+        for label, item in self._iter_bss_items(current_bss):
+            if label not in context_labels:
+                continue
+            section = self._bss_section_for_label(label) or "A"
+            subset.setdefault(section, {})
+            subset[section][label] = item
+
+        if not subset:
+            return ""
+
+        return self._bss_current_document_for_prompt(subset)
+
+
+
+
+    def _ingestion_collect_related_labels_for_family(
+        self,
+        family_labels: set[str],
+        connected_items: list[dict],
+    ) -> set[str]:
+        """
+        Return labels (any family) that are related to family_labels via
+        responsibilities, in *either* direction.
+        """
+        related: set[str] = set()
+        label_index = {
+            (item.get("label") or ""): item
+            for item in connected_items
+            if (item.get("label") or "")
+        }
+
+        # Regex for label-like tokens
+        label_re = re.compile(
+            r"(?:ROLE|PROC|COMP|UI|API|INT|ENT|NFR|UC)-\d+_[A-Za-z0-9_]+"
+        )
+
+        # (a) reverse: items whose responsibilities mention any family label
+        for item in connected_items:
+            lbl = (item.get("label") or "").strip()
+            if not lbl or lbl in family_labels:
+                continue
+            for resp in (item.get("responsibilities") or []):
+                txt = resp or ""
+                if any(fam_lbl in txt for fam_lbl in family_labels):
+                    related.add(lbl)
+                    break
+
+        # (b) forward: labels referenced inside family items' responsibilities
+        for item in connected_items:
+            lbl = (item.get("label") or "").strip()
+            if lbl not in family_labels:
+                continue
+            for resp in (item.get("responsibilities") or []):
+                for tok in label_re.findall(resp or ""):
+                    tok = tok.strip()
+                    if (
+                        tok
+                        and tok not in family_labels
+                        and tok in label_index
+                    ):
+                        related.add(tok)
+
+        # never treat family labels themselves as "related"
+        return {lbl for lbl in related if lbl not in family_labels}
+
+
+
+    def _ingestion_format_uc_blocks(self, uc_blocks: list[dict]) -> str:
+        parts: list[str] = []
+        for uc in uc_blocks:
+            raw = (uc.get("raw") or "").strip()
+            if raw:
+                parts.append(raw)
+        return "\n\n".join(parts)
+
+    def _ingestion_format_items_list(self, items: list[dict]) -> str:
+        # compact, stable, JSON – not Python repr
+        return json.dumps(items, indent=2, ensure_ascii=False)
+
 
     def _ingestion_strip_bullet(self, line: str) -> str:
         s = (line or "").lstrip()
@@ -765,7 +1273,7 @@ MANDATORY:
         blocks = []
         cur = []
         for ln in lines:
-            if _UC_LABEL_RE.fullmatch((label or "").strip()):
+            if _UC_LABEL_RE.fullmatch((ln or "").strip()):
                 if cur:
                     blocks.append(cur)
                 cur = [ln.strip()]
@@ -780,7 +1288,7 @@ MANDATORY:
 
         for block in blocks:
             label = (block[0] or "").strip()
-            if _UC_LABEL_RE.fullmatch((label or "").strip()):
+            if not _UC_LABEL_RE.fullmatch((label or "").strip()):
                 continue
 
             related = set()
@@ -887,7 +1395,7 @@ MANDATORY:
                     if colon > 0:
                         maybe_label = s[:colon].strip()
                         rest = s[colon + 1 :].strip()
-                        if self._CONNECTED_LABEL_RE.fullmatch((maybe_label or "").strip()):
+                        if _CONNECTED_LABEL_RE.fullmatch((maybe_label or "").strip()):
                             flush_ledger()
                             ledger_current_label = maybe_label
                             ledger_labels.add(maybe_label)
@@ -917,7 +1425,7 @@ MANDATORY:
             for arr_name in ("primary_actors", "secondary_actors", "interaction_points", "entities", "nfrs"):
                 for tok in (uc.get(arr_name) or []):
                     t = (tok or "").strip()
-                    if self._CONNECTED_LABEL_RE.fullmatch(t):
+                    if _CONNECTED_LABEL_RE.fullmatch(t):
                         related.add(t)
                         connected_map.setdefault(t, set())
             uc["related_items"] = sorted(related)

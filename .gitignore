@@ -18,3 +18,8 @@ frontend/.env.production
 tests
 tests
 - t
+classes/__pycache__
+classes/__pycache__/backend.cpython-312.pyc
+classes/__pycache__/utils.cpython-312.pyc
+classes/__pycache__/model_props.cpython-312.pyc
+classes/__pycache__/ingestion_prompts.cpython-312.pyc
