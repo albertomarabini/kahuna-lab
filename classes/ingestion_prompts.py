@@ -204,7 +204,7 @@ C) Label family semantics (hard rule)
 - API-*:
   - Internal programmatic boundary we own: endpoints, webhook receivers, RPC operations exposed by a COMP-* we operate.
   - API-* can serve both:
-    - inbound integrations (external systems calling us, e.g. webhooks), and
+    - inbound integrations (external systems calling us trough a INT-* surface, e.g. webhooks), and
     - internal or UI clients (e.g. browser/mobile calling our HTTP APIs).
   - API-* appears in Flow as a carrier between callers (UI-* or external systems) and PROC-*.
   - API-* is always hosted on some COMP-* and implemented by one PROC-*, consumed by at least one PROC-* or UI-* or external system.
@@ -221,7 +221,7 @@ C) Label family semantics (hard rule)
 
 
 - You MUST NOT create PROC-* or COMP-* for an external system.
-  - External system like Stripe, payment gateway, robot sensor module ARE System we describe only through the interaction we have with them either Inbound (API-*) or Outbound (INT-*) but are not actors rappresented in our ledger
+  - External system like Stripe, payment gateway, robot sensor module ARE System we describe only through the interaction we have with them either Inbound (INT-* -> API-*) or Outbound (PROC -> INT-*) but are not actors rappresented in our ledger
 - External UI surfaces are NOT UI-*.
   - If the interaction surface is hosted/owned by an external system (e.g., Stripe hosted checkout page, vendor console, third-party device UI),
     represent it as INT-* (a capability surface of that external boundary), not as UI-*.
@@ -314,7 +314,7 @@ For each candidate transition, name the acting subject(s):
 - PROC-* for internal controllers/processes (compute/decide/coordinate/update).
 - External systems are NOT primary actors; they appear only as interaction points:
   - outbound: INT-* capability surfaces we call/use
-  - inbound: API-* receivers we expose (called by external systems)
+  - inbound: API-* receivers we expose (called by an INT-* surface from an external system)
 
 If SOURCE_TEXT implies “the system does X” but does not name the internal subject:
 - introduce exactly one PROC-*_SystemController for the UC later (not per-step).
@@ -323,8 +323,8 @@ Step 5 — Pin interaction points per transition (where the handoff happens)
 For each transition, extract the carrier (if stated) and classify:
 
 - UI-*  : human-facing surfaces (screen/panel/button/key/CLI/file-as-input).
-- API-* : programmatic boundary we own (endpoint/webhook/RPC operation) exposed by a specific runtime and consumed either by other internal runtimes or external inbound integration (eg:Stripe Webhhoks)
-- INT-* : external capability surface (Stripe, vendor API, hardware interface) we interact with outbound.
+- API-* : programmatic boundary we own (endpoint/webhook/RPC operation) exposed by a specific runtime and consumed either by other internal runtimes or external inbound integration called by an INT-* (eg:Stripe Webhhoks)
+- INT-* : external capability surface (Stripe, vendor API, hardware interface) we interact with either inbound (we call a API-* service interface  from an INT-* point of interaction) or outbound (an external system INT-* interaction surface is called trough a PROC-* that implements the integration)
 
 Runtime boundary discipline:
 - Only record handoffs that cross UI/API/INT carriers.
@@ -444,7 +444,7 @@ UC-3_Browser_Checkout_Via_Stripe_Hosted_Form_And_Webhook_Finalization
   - PROC-1_Redirect_To_Stripe_on_buy uses INT-1_Stripe_Hosted_Form_URL to build the redirect URL; UI-1_Cart_Panel redirects the browser to the Stripe hosted form.
   - After payment, Stripe redirects the user back to UI-2_Checkout_Waiting_Room.
   - UI-2_Checkout_Waiting_Room polls ENT-1_User_Cart.status via API-1_Internal_Cart_Status.
-  - PROC-2_Webhook_worker (on COMP-2_Webhook_Processor) receives payment notification via API-2_Stripe_Webhook_Endpoint.
+  - PROC-2_Webhook_worker (on COMP-2_Webhook_Processor) receives payment notification via API-2_Stripe_Webhook_Endpoint being called by INT-3_Stripe_Webhook_Client.
   - PROC-2_Webhook_worker identifies ENT-1_User_Cart and sets ENT-1_User_Cart.status="paid" or "not_paid" (and clears ENT-1_User_Cart.intention_id if "not_paid").
   - UI-2_Checkout_Waiting_Room reads final status via API-3_Internal_Cart_Status_Read.
   - UI-2_Checkout_Waiting_Room redirects the browser to UI-3_Payment_Succesful or UI-4_Payment_Failure_Destination.
@@ -455,6 +455,7 @@ UC-3_Browser_Checkout_Via_Stripe_Hosted_Form_And_Webhook_Finalization
   - ENT-1_User_Cart: stores status and intention_id; intention_id cleared on not_paid.
   - INT-2_Stripe_PaymentIntent_Create: external capability returning a payment intention identifier.
   - INT-1_Stripe_Hosted_Form_URL: external capability providing hosted payment form destination URL.
+  - INT-3_Stripe_Webhook_Client: System used by stripe to callback directly our system.
   - UI-2_Checkout_Waiting_Room: waiting surface; polls cart status; redirects on final outcome.
   - API-1_Internal_Cart_Status: internal API to read current cart status.
   - API-3_Internal_Cart_Status_Read: internal API used by waiting room to read final cart status.
@@ -582,8 +583,8 @@ Epistemic-1 Label family semantics
   - Do NOT create PROC-* for external systems; those are always expressed via INT-* + (optionally) API-* boundaries we own.
 
 - INT-*:
-  - External capability surface / outbound integration boundary owned by an external system.
-  - INT-* appears only as an interaction point in Flow (a locus where a PROC-* calls out to an external system); the external system behind it is not a first-class actor in our ledger.
+  - External capability surface / integration boundary owned by an external system.
+  - INT-* appears only as an interaction point in Flow (a locus where a PROC-* calls out to an external system or where an API-* is called from outside); the external system behind it is not a first-class actor in our ledger.
   - It is allowed for an interaction chain to end on INT-* (Primary Actor → … → INT-*).
   - INT-* is never hosted on a COMP-* we own but, the interaction with it is implemented by at least one PROC-* (the internal process that uses/handles that integration); UC_EXTRACTOR records this only when SOURCE_TEXT makes it clear and otherwise leaves it as a gap (no invention of owners).
 
@@ -616,6 +617,7 @@ Epistemic-1 Label family semantics
 - UI-*:
   - Internal interaction gateway (interaction carrier) that allows a ROLE-* to trigger/observe system behavior.
   - UI-* is an artifact independent of which COMP-* hosts it (client app, server-rendered UI, desktop app, etc.).
+  - UI-* might trigger internal PROC-* directly (eg: Windows/mobile apps) or throiugh the mediation of an API-* (WebApps) or even live in a mixed architecture
   - UI-* MUST NOT be used for external / third-party hosted surfaces (those are INT-*) or for process-level boundaries (those are PROC-* / API-*).
   - UI-* appears in Flow as the carrier for human actions, for feedback surfaces (success, error, loading, state changes) and other information that is displayed to the user in order for him to take an informed decision and appropriate action.
   - For each UI-* that appears, UC_EXTRACTOR should, when SOURCE_TEXT allows, tie it to:
@@ -628,10 +630,10 @@ Epistemic-1 Label family semantics
 - API-*:
   - Internal programmatic boundary we own: endpoints, webhook receivers, RPC operations exposed by a COMP-* we operate.
   - API-* can serve both:
-    - inbound integrations (external systems calling us, e.g. webhooks), and
+    - inbound integrations (external systems rappresented by an INT-* calling us, e.g. webhooks), and
     - internal or UI clients (e.g. browser/mobile calling our HTTP APIs).
   - API-* appears in Flow as a carrier between callers (UI-* or external systems) and PROC-*.
-  - API-* is always hosted on some COMP-* and implemented by one PROC-*, consumed by at least one PROC-* or UI-* or external system.
+  - API-* is always hosted on some COMP-* and implemented by one PROC-*, consumed by at least one PROC-* or UI-* or INT-*.
     - When SOURCE_TEXT makes host or handler explicit (“/checkout endpoint on the webserver handled by checkout service”), record those relationships in the responsibilities ledger.
     - When consumers are named (UI-* or “Stripe webhook infrastructure”), record that consumption as well.
     - UC_EXTRACTOR MUST NOT invent paths, hosts, or consumers; absent evidence, leave gaps to be filled later.
@@ -645,12 +647,12 @@ Epistemic-1 Label family semantics
 
 
 - You MUST NOT create PROC-* or COMP-* for an external system.
-  - External system like Stripe, payment gateway, robot sensor module ARE System we describe only through the interaction we have with them either Inbound (API-*) or Outbound (INT-*) but are not actors rappresented in our ledger
+  - External system like Stripe, payment gateway, robot sensor module ARE System we describe only through the interaction we have with them using an service interaction surface (INT-*) either Inbound (INT-* -> API-*) or Outbound (PROC-* -> INT-*) but are not actors rappresented in our ledger
 - External UI surfaces are NOT UI-*.
   - If the interaction surface is hosted/owned by an external system (e.g., Stripe hosted checkout page, vendor console, third-party device UI),
     represent it as INT-* (a capability surface of that external boundary), not as UI-*.
 - If SOURCE_TEXT implies multiple distinct external interaction surfaces for the same vendor/system, mint multiple INT-* items, each named as:
-  INT-*_Vendor_<CapabilitySurface>
+  INT-*_Vendor_<Capability_Surface>
   Examples: INT-*_Stripe_Payment_Intents, INT-*_Stripe_Hosted_Checkout_Form, INT-*_Stripe_Webhook_Event_Source
 
 
@@ -801,7 +803,7 @@ Even when they would make a rendition more semantically descriptive **You are fo
 
 
 epistemic_2_rules = {
-  "PROC":"""
+    "PROC":"""
 
 ### PROC-* Processes (~Emergent; Required when UCs need orchestration)
 
@@ -814,7 +816,7 @@ epistemic_2_rules = {
     - what it calls/consumes (UI/API/INT/entity),
     - what state change/effect/message it produces.
   - `snippets`: any code/pseudocode the user gives or asks for that belongs to this orchestration.
-  - `notes`: responsibilities, invariants, and behavioral constraints of this workflow (not generic platform rules).
+  - `notes`: the COMP-* hosting it, responsibilities, invariants, and behavioral constraints of this workflow (not generic platform rules).
 
 - Examples w output format:
 ````
@@ -848,7 +850,7 @@ def Stripe_Hosted_Form_create_session(
 ```
 
 - [notes]:
-PROC-1_Redirect_To_Stripe_on_buy does not decide payment success or failure; it only prepares checkout and hands control to Stripe.
+PROC-1_Redirect_To_Stripe_on_buy runs on COMP-1_Webeserer. It does not decide payment success or failure; it only prepares checkout and hands control to Stripe.
 
 :::[PROC-2_Webhook_worker]
 
@@ -864,7 +866,7 @@ At each run, PROC-2_Webhook_worker reads unprocessed entries from ENT-2_Stripe_M
 After successful processing, PROC-2_Webhook_worker marks the corresponding ENT-2_Stripe_Messages_Cache rows as processed so they are not handled again.”
 
 - [notes]:
-Idempotency and no-double-charge behavior for UC-1_Cart_Checkout depend heavily on PROC-2_Webhook_worker correctly routing and de-duplicating Stripe events.
+Runs on COMP-2_Webworker. Idempotency and no-double-charge behavior for UC-1_Cart_Checkout depend heavily on PROC-2_Webhook_worker correctly routing and de-duplicating Stripe events.
 
 - [open_items]:
 high: define retry/backoff policy when downstream PROC-10/PROC-11/PROC-12 fail while processing an event; low: decide whether ordering constraints between different event types (e.g. `payment_intent.*` vs `checkout.session.completed`) must be enforced; think about how to safely reprocess ENT-2_Stripe_Messages_Cache for backfills or bug fixes"
@@ -875,9 +877,9 @@ high: define retry/backoff policy when downstream PROC-10/PROC-11/PROC-12 fail w
   - Each PROC-* **MUST** specify on what COMP-* is running (CRITICAL) and any API-* it interacts with.
   - By finalization, each PROC-* should mention the INT-*, API-*, UI-* surfaces and entities it actually uses/runs/implements/interacts with.
   - Do **not** create separate PROC-* items merely because there are alternative paths (success vs failure vs compensation) inside the same workflow; model those as flow branches within a single process unless the user clearly separates them.
-
-  """,
-  "COMP":"""
+  - Depending on architecture a non secondary detail is that API-* are not always needed for the interaction between an UI-* and a PROC-* (eg: mobile or windows apps)
+""",
+    "COMP":"""
 
 ### COMP-* Components (~Emergent; runtime coordinate system, center of gravity B)
 
@@ -935,7 +937,7 @@ COMP-2_Database stores ENT-1_User_Cart and ENT-2_Stripe_Messages_Cache, which ar
     - introduce a minimal suitable component placeholder and mark unknowns as gaps.
 
 """,
-  "ROLE" : """
+    "ROLE" : """
 ### ROLE-* (human actors; ~Emergent; Required when restricted actions/data exist)
 
 - Essence: human roles/personas that interact with the system and have responsibilities or visibility boundaries.
@@ -969,7 +971,7 @@ med: clarify if anonymous/guest users are supported or if a user account is alwa
   - ROLE-* should mention the usecases is connected to and the UI-* it uses to interact with the system
 
 """,
-  "UI":"""
+    "UI":"""
 
 ### UI-* (surfaces; Optional → Required when UCs depend on UI)
 
@@ -1027,11 +1029,12 @@ med: clarify whether the cart panel also lets the user change quantities or remo
       - An existing PROC-* or COMP-* serving/executing that surface (or a high-severity gap recorded) as soon as the surface is introduced.
       - At least one ROLE-* using this surface (or a high-severity gap recorded) as soon as the surface is introduced.
       - The list API-* it interacts with
+      - The list of PROC-* that are triggered directly without an API-* mediation depending on architecture(eg: Mobile Apps, Desktop Apps)
   - Each UI flow must expose at least one explicit “system action” (trigger that can be actioned by the user) once known; if missing, record this as a UI gap instead of inventing a carrier.
   - UI items might contain multiple displayed items and actions: while the process of requirement gathering progresses they must all be collected
 
 """,
-  "ENT":"""
+    "ENT":"""
 
 ### ENT-* (entities/data models; Optional → Required when system stores or validates records)
 
@@ -1048,6 +1051,7 @@ med: clarify whether the cart panel also lets the user change quantities or remo
 
     - whether this record is system-of-record here or mirrored from an external system
     - high-level lifecycle (e.g. “draft → active → archived”) when it matters for flows.
+    - When possible on what COMP-* is stored
 
 
 - Examples w output format:
@@ -1074,10 +1078,10 @@ class UserCart(Base):
 ```
 
 - [notes]:
-UC-1_Cart_Checkout and PROC-1_Redirect_To_Stripe_on_buy move ENT-1_User_Cart from `draft` to `checkout` and attach Stripe identifiers. PROC-2_Webhook_worker and payment handlers later move it to `paid` or `payment_failed` based on events from INT-2_Stripe_Webhooks. ENT-1_User_Cart itself only holds state; payment logic lives in PROC-* and API-* items.
+Is persisted in COMP-1_Datastore; UC-1_Cart_Checkout and PROC-1_Redirect_To_Stripe_on_buy move ENT-1_User_Cart from `draft` to `checkout` and attach Stripe identifiers. PROC-2_Webhook_worker and payment handlers later move it to `paid` or `payment_failed` based on events from INT-2_Stripe_Webhooks. ENT-1_User_Cart itself only holds state; payment logic lives in PROC-* and API-* items.
 
 - [open_items]:
-med: clarify which COMP-* datastore persists ENT-1_User_Cart; low: define whether historical carts are archived or deleted and how that affects reporting and reconciliation.
+low: define whether historical carts are archived or deleted and how that affects reporting and reconciliation.
 
 ```
 
@@ -1087,11 +1091,14 @@ med: clarify which COMP-* datastore persists ENT-1_User_Cart; low: define whethe
     - attach fields to the most relevant existing entity, or
     - add a gap asking which entity owns them if unclear.
 """,
-  "INT":"""
+
+    "INT":"""
 
 ### INT-* (integrations/external systems; Optional → Required when external dependencies exist)
 
-- Essence: boundary contracts for outbound integrations with external systems (often asynchronous, with explicit expectations on messages/behavior).
+- Essence: boundary contracts for integrations with external systems (often asynchronous, with explicit expectations on messages/behavior).
+    - It can be inbound (when the INT-* will call an API-* endpoint we expose) or outbound (when a PROC-* calls the INT-* surface exposed by an external system/vendor)
+    - We must create an INT-* for each surface we call or we are called by
 
 - Minimum conceptual content:
   - `definition`: which external system this is and what we use it for.
@@ -1112,6 +1119,17 @@ PROC-1_Redirect_To_Stripe_on_buy calls INT-1_Stripe_Hosted_Form to create the ch
 
 - [open_items]:
 med: clarify which PROC-* is the primary owner of calls to INT-1_Stripe_Hosted_Form; low: decide whether additional Stripe configuration (tax settings, discounts, locale) is per ENT-1_User_Cart or global for the system.
+
+:::[INT-2_Stripe_Payment_Events]
+
+- [definition]:
+Stripe webhook integration used to receive asynchronous payment and checkout events from Stripe for UC-1_Cart_Checkout.
+
+- [notes]:
+INT-2_Stripe_Payment_Events calls API-3_Stripe_Webhook_Endpoint exposed by COMP-1_Public_API_Service whenever Stripe delivers events such as checkout.session.completed or payment_intent.succeeded. PROC-4_Handle_Stripe_Payment_Event runs on COMP-1_Public_API_Service, validates the Stripe signature, looks up ENT-1_User_Cart and ENT-2_Payment using metadata, and updates local state (for example, mark cart as paid and create ENT-3_Order). No ROLE-* interacts directly with this integration; processing is fully backend-driven.
+
+- [open_items]:
+high: enumerate which Stripe event types must be handled and what each should do in terms of ENT-1_User_Cart / ENT-2_Payment / ENT-3_Order; med: decide idempotency strategy for replayed or duplicated webhook deliveries; med: clarify error handling when ENT-* records referenced in the event payload are missing or inconsistent; low: choose logging/observability level for ignored or malformed events.
 ````
 
 - Key rules:
@@ -1124,13 +1142,14 @@ med: clarify which PROC-* is the primary owner of calls to INT-1_Stripe_Hosted_F
     - By finalization, each active INT-* MUST reference exactly one PROC-* that performs or handles the interaction.
 
 """,
-  "API":"""
+
+    "API":"""
 
 
 ### API-* (programmatic interfaces; Optional → Required when needed)
 
 - Essence
-  Programmatic interfaces/boundary we provide to clients/internal processes or third parties, including inbound integrations (eg:webhook receivers).
+  Programmatic interfaces/boundary we provide to clients/internal processes or third parties, including inbound integrations (eg:webhook receivers) when called by an INT-*.
 - Minimum conceptual content:
 
   - `definition`: operation name and what caller gets by using it (method + path or RPC name if known).
@@ -1158,12 +1177,12 @@ Authorization: user-session-or-JWT
 
 Request JSON:
 {
-  "cart_id": "UUID"
+    "cart_id": "UUID"
 }
 
 Response 200 JSON:
 {
-  "redirect_url": "https://checkout.stripe.com/..."
+    "redirect_url": "https://checkout.stripe.com/..."
 }
 
 Error responses:
@@ -1182,10 +1201,10 @@ Error responses:
 
 - Key rules:
    - When an API endpoint is first introduced, explicitly ask the PROC-* that implements it; if none exists yet, PROC-* placeholder and record the ownership as a gap.
-   - By finalization, each active API-* MUST mention to at least one PROC-* or UI-* that actually consumes it, or an External system that uses it as inbound integration point.
+   - By finalization, each active API-* MUST mention to at least one PROC-* or UI-* that actually consumes it, or an External system INT-* inbound integration that uses it as integration point.
 
 """,
-  "NFR":"""
+    "NFR":"""
 ### NFR-* (non-functional requirements; Required minimal set, Optional additions)
 
 - Essence
@@ -1214,7 +1233,7 @@ med: decide how violations of NFR-1_Payments_Consistency are detected and surfac
 - Key rules:
    - NFR-* must mention the items they are related to.
 """,
-  "UC":"""
+    "UC":"""
 
 ### UC-* Use Cases (~Emergent; center of gravity A)
 
@@ -1260,7 +1279,7 @@ low: Decide if we need a separate UC for “retry payment from failed checkout�
   - A single user message may yield multiple UC-* items when it clearly describes multiple different “why → outcome” chains; do not artificially merge distinct intents into one UC.
 
 """,
-  "A":"""
+    "A":"""
 ### A-* Use Cases (~Emergent; )
 
 - **A1_PROJECT_CANVAS (~Emergent; ask first)**
@@ -1326,7 +1345,7 @@ Privacy and security guarantees follow Stripe’s PCI responsibility model, with
 
 ```
 
-  """
+"""
 
 
 }

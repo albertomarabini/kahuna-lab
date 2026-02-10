@@ -48,9 +48,6 @@ class Backend(Utils):
             self.default_llm = None
             self.default_chat_llm = None
 
-        # Load Requirements Schema
-        with open("./classes/requirements_schema.json", "r") as f:
-            self.requirements_schema = json.load(f)
 
         # BSS Chat
         self._bss_labels = self._bss_section_order()
@@ -214,12 +211,78 @@ class Backend(Utils):
         if deleted_labels and self._bss_any_item_references_labels(updated_bss, deleted_labels):
             updated_bss = self._emergency_purge_deleted_labels_from_references(updated_bss, deleted_labels)
 
-        # POST: recompute host-maintained dependency fields for ALL items
-        updated_bss = self._recompute_bss_dependency_fields(updated_bss)
+        # Identify labels whose relationships the LLM is allowed to edit:
+        # labels that are in slot_updates and are currently in 'draft' status
+        # (this includes new items, which _apply_bss_slot_updates creates as draft).
+        draft_roots: set[str] = set()
+        locked_for_relationships: set[str] = set()
+
+        for label in (slot_updates or {}).keys():
+            if not self._is_bss_label(label):
+                continue
+            section = self._bss_section_for_label(label)
+            if not section:
+                continue
+            item = (updated_bss.get(section) or {}).get(label)
+            if not item:
+                continue
+
+            norm = self._normalize_bss_item(item)
+            status_now = (norm.get("status") or "").strip().lower()
+
+            if status_now == "draft":
+                draft_roots.add(label)
+            else:
+                # LLM emitted this label, but it is not in draft → frozen for relationships
+                locked_for_relationships.add(label)
+
+        if locked_for_relationships:
+            next_question += f"\n\nMessage from Host: the LLM tried to modify the following items: {', '.join(list(locked_for_relationships))} that have been locked. \nIf you agree with this change please change the permissions and ask the LLM to try again."
+
+
+        # POST: recompute host-maintained dependency fields.
+        #
+        # - If we deleted labels, keep the old behaviour: full recompute
+        #   so everything drops references to removed nodes.
+        # - Otherwise, only recompute relationships in the local region
+        #   around labels that were:
+        #     - already in draft before this turn, and
+        #     - emitted in this turn (draft_roots).
+        if deleted_labels:
+            updated_bss = self._recompute_bss_dependency_fields(updated_bss)
+        elif draft_roots:
+            updated_bss = self._recompute_bss_dependency_fields(
+                updated_bss,
+                root_labels=draft_roots,
+            )
+        # else: no relationship recompute (non-draft items' relationships stay frozen)
 
         self.save_bss_schema(project_id, updated_bss)
 
-        # Compute amount/currency from the LLM client.
+        # 1) Early callback: send updated doc + bot reply immediately
+        #    (intermediate event; final HTTP response will only contain
+        #    relationship diffs + heartbeat).
+        self.emit(
+            "chat_early_callback",
+            {
+                "bot_message": next_question,
+                "bss_schema": self._redact_bss_schema_for_ui(updated_bss),
+                "bss_labels": self._bss_labels,
+            },
+        )
+
+        # 2) Refine COMP <-> API relationship directions using a second LLM call.
+        updated_bss, updated_relationships = self._refine_proc_api_relationships(
+            updated_bss,
+            draft_roots=draft_roots,
+            llm_client=chat_llm,
+        )
+
+        # Persist any relationship changes derived from the COMP/API tie-break step.
+        if updated_relationships:
+            self.save_bss_schema(project_id, updated_bss)
+
+        # 3) Compute amount/currency from the LLM client (both calls).
 
         idempotency_key = record_pending_charge(
             self.SessionFactory,
@@ -240,9 +303,7 @@ class Backend(Utils):
         )
 
         return {
-            "bot_message": next_question,
-            "bss_schema": self._redact_bss_schema_for_ui(updated_bss),
-            "bss_labels": self._bss_labels,
+            "updated_relationships": updated_relationships,
             "heartbeat": idempotency_key,
         }
 
@@ -857,7 +918,7 @@ class Backend(Utils):
 
         # canonicalization passes per family
         current_bss = {}  # start from empty BSS graph
-        execution_order = ["COMP", "INT", "API", "ENT", "ROLE", "UI", "PROC", "NFR", "UC", "A"]
+        execution_order = ["COMP", "PROC", "UI", "INT", "API", "ENT", "ROLE", "NFR", "UC", "A"]
 
         # index non-UC connected items once
         connected_index = {
@@ -1043,6 +1104,21 @@ class Backend(Utils):
                 if not family_items:
                     break
 
+        # Optional PROC<->API relationship refinement using the same LLM client.
+        # In ingestion everything is effectively "new", so we allow refinement
+        # across all PROC/API items (subject to the internal guards).
+        self.emit("ingestion_status", {"note": f"Refining"})
+        proc_api_roots: set[str] = {
+            lbl
+            for lbl, _ in self._iter_bss_items(current_bss)
+            if self._bss_label_type(lbl) in ("PROC", "API")
+        }
+        if proc_api_roots:
+            current_bss, _ = self._refine_proc_api_relationships(
+                current_bss,
+                draft_roots=proc_api_roots,
+                llm_client=llm,
+            )
 
         # finally persist
         self.save_bss_schema(project_id, current_bss)

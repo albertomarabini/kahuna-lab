@@ -321,9 +321,9 @@ Each segment:
 
 - Key rules:
   - Each PROC-* **MUST** specify on what COMP-* is running (CRITICAL) and any API-* it interacts with.
-  - By finalization, each PROC-* should mention the INT-*, API-*, UI-* surfaces and entities it actually uses/runs/implements/interacts with.
+  - **By finalization, each PROC-* should mention the INT-*, API-*, UI-* surfaces and entities it actually uses/runs/implements/interacts with (CRITICAL)**
   - Do **not** create separate PROC-* items merely because there are alternative paths (success vs failure vs compensation) inside the same workflow; model those as flow branches within a single process unless the user clearly separates them.
-
+  - Depending on architecture a non secondary detail is that API-* are not always needed for the interaction between an UI-* and a PROC-* (eg: mobile or windows apps)
 ---
 
 ### COMP-* Components (~Emergent; runtime coordinate system, center of gravity B)
@@ -347,7 +347,7 @@ Each segment:
   - Do **not** create a new COMP-* solely because a new integration, entity, process, or UI responsibility appears:
     - before taking such a step, gain clarity from the user over what COMP-* already in the document should assume that responsibility if there is a suitable host, or
     - if none is suitable, gain a roughly complete spectrum of responsibilities the final COMP-* should have before proposing a new one.
-  - Be ready to accept that multiple COMP-* responsibilities may later be collocated in the same runtime deployment.
+  - Be ready to accept that multiple COMP-* responsibilities may later be collated in the same runtime deployment.
   - Treat each datastore owned/operated by the system as a COMP-* of kind “datastore” whatever type of data it may contain (eg: files).
   - Do **not** create COMP-* for libraries/frameworks or pure code modules
   - Do **not** create COMP-* for external systems (they are part of INT-* definition).
@@ -398,9 +398,10 @@ Each segment:
 - Key rules:
   - Ownership at creation is mandatory:
     - When a UI surface appears, you MUST mention:
-      - An existing PROC-* or COMP-* serving/executing that surface (or a high-severity gap recorded) as soon as the surface is introduced.
+      - An existing PROC-* and/or COMP-* serving/executing that surface (or a high-severity gap recorded) as soon as the surface is introduced.
       - At least one ROLE-* using this surface (or a high-severity gap recorded) as soon as the surface is introduced.
       - The list API-* it interacts with
+      - The list of PROC-* that are triggered directly without an API-* mediation depending on architecture(eg: Mobile Apps, Desktop Apps)
   - Each UI flow must expose at least one explicit “system action” (trigger that can be actioned by the user) once known; if missing, record this as a UI gap instead of inventing a carrier.
   - UI items might contain multiple displayed items and actions: while the process of requirement gathering progresses they must all be collected
 
@@ -421,6 +422,7 @@ Each segment:
 
     - whether this record is system-of-record here or mirrored from an external system
     - high-level lifecycle (e.g. “draft → active → archived”) when it matters for flows.
+    - The COMP-* that stores it
 
 {example_ENT}
 
@@ -434,7 +436,9 @@ Each segment:
 
 ### INT-* (integrations/external systems; Optional → Required when external dependencies exist)
 
-- Essence: boundary contracts for outbound integrations with external systems (often asynchronous, with explicit expectations on messages/behavior).
+- Essence: boundary contracts for integrations with external systems (often asynchronous, with explicit expectations on messages/behavior).
+    - It can be inbound (when the INT-* will call an API-* endpoint we expose) or outbound (when a PROC-* calls the INT-* surface exposed by an external system/vendor)
+    - We must create an INT-* for each surface we call or we are called by
 
 - Minimum conceptual content:
   - `definition`: which external system this is and what we use it for.
@@ -442,6 +446,7 @@ Each segment:
 
     - the kind of messages or operations involved (e.g. “payments”, “inventory sync”),
     - any high-level constraints the user states about how we must talk to it (e.g. “must use their hosted checkout”).
+    - The PROC-* that implements it (outbound integration) or the API-* it calls (inbound integration like a webhook)
 
 {example_INT}
 
@@ -452,14 +457,14 @@ Each segment:
   - Do not invent retry policies or SLAs; keep unknowns as gaps.
   - Ownership and placement rule:
     - When an integration is first introduced, explicitly ask which PROC-* implements it; if unknown, introduce a minimal PROC-* placeholder and keep direction/ownership as a high- or med-severity gap.
-    - By finalization, each active INT-* MUST reference exactly one PROC-* that performs or handles the interaction.
+    - By finalization, each active INT-* MUST reference exactly one PROC-* that performs or handles the interaction or the API-* it calls (inbound integration like a webhook)
 
 ---
 
 ### API-* (programmatic interfaces; Optional → Required when needed)
 
 - Essence
-  Programmatic interfaces/boundary we provide to clients/internal processes or third parties, including inbound integrations (eg:webhook receivers).
+  Programmatic interfaces/boundary we provide to clients/internal processes or third parties, including inbound integrations (eg:webhook receivers) called by an INT-* inbound surface.
 - Minimum conceptual content:
 
   - `definition`: operation name and what caller gets by using it (method + path or RPC name if known).
@@ -472,12 +477,13 @@ Each segment:
 
     - what the endpoint guarantees when it reports success/failure,
     - any specific error behaviors that matter for callers’ flows.
+    - What PROC-*, UI-*, INT-* calls it and what PROC-* implements it
 
 {example_API}
 
 - Key rules:
-   - When an API endpoint is first introduced, explicitly ask the PROC-* that implements it; if none exists yet, PROC-* placeholder and record the ownership as a gap.
-   - By finalization, each active API-* MUST mention to at least one PROC-* or UI-* that actually consumes it, or an External system that uses it as inbound integration point.
+   - When an API endpoint is first introduced, explicitly ask the PROC-* that implements it; if none exists yet, PROC-* placeholder and record the ownership as a gap. The Implementig PROC-* Must be explicitely mentioned as such.
+   - By finalization, each active API-* MUST mention to at least one PROC-* or UI-* that actually consumes it, or an External system that uses it as inbound integration point passing trough an INT-* integration point.
 ---
 
 ### NFR-* (non-functional requirements; Required minimal set, Optional additions)

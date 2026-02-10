@@ -1029,17 +1029,17 @@ Thanks :)
 
 
 
-    def _recompute_bss_dependency_fields(self, bss_schema: dict) -> dict:
+    def _recompute_bss_dependency_fields(self, bss_schema: dict, root_labels: set[str] | None = None) -> dict:
         allowed_deps = {
             "A":   {"UC", "ROLE", "NFR", "PROC", "ENT", "INT", "API", "UI", "COMP"},
             "UC":  {"ROLE", "UI", "PROC", "API", "ENT", "INT", "NFR", "COMP"},
-            "PROC":{"COMP", "ENT", "INT", "API", "NFR", "ROLE", "PROC"},
+            "PROC":{"COMP", "ENT", "INT", "API", "NFR", "ROLE", "PROC", "UI"},
             "COMP":{"COMP", "INT", "NFR", "API", "ENT", "UI"},
             "ROLE":{"UI"},
-            "UI":  {"API", "NFR"},
+            "UI":  {"API", "NFR", "COMP"},
             "ENT": {"ENT"},
-            "INT": set(),
-            "API": {"ENT", "NFR"},
+            "INT": {"API"},
+            "API": {"ENT", "NFR", "COMP"},
             "NFR": set(),
         }
 
@@ -1109,42 +1109,120 @@ Thanks :)
 
             refs_by_label[label] = resolved
 
-        # 3) build set of unordered pairs {A,B} for existing labels
-        pair_set: set[frozenset[str]] = set()
-        for src, refs in refs_by_label.items():
-            for dst in refs:
-                if dst in all_labels:
-                    pair_set.add(frozenset((src, dst)))
+        # 3) full vs partial recompute
+        roots: set[str] = set()
+        if root_labels:
+            for lbl in root_labels:
+                if not isinstance(lbl, str):
+                    continue
+                canon = canonical_by_upper.get(lbl.strip().upper())
+                if canon:
+                    roots.add(canon)
 
-        # 4) orient each pair ONCE into children edges
-        children: dict[str, set[str]] = {lbl: set() for lbl in flat.keys()}
+        if not roots:
+            # GLOBAL recompute (previous behaviour)
+            pair_set: set[frozenset[str]] = set()
+            for src, refs in refs_by_label.items():
+                for dst in refs:
+                    if dst in all_labels:
+                        pair_set.add(frozenset((src, dst)))
 
-        for pair in pair_set:
-            a, b = tuple(pair)  # exactly 2 elements
+            children: dict[str, set[str]] = {lbl: set() for lbl in flat.keys()}
 
-            # stable order for tie-breaks
-            if self._bss_label_sort_key(b) < self._bss_label_sort_key(a):
-                a, b = b, a
+            for pair in pair_set:
+                a, b = tuple(pair)  # exactly 2 elements
 
-            can_a = can_have_child(a, b)  # a can have b as dependency
-            can_b = can_have_child(b, a)  # b can have a as dependency
+                # stable order for tie-breaks
+                if self._bss_label_sort_key(b) < self._bss_label_sort_key(a):
+                    a, b = b, a
 
-            if can_a and not can_b:
-                parent, child = a, b
-            elif can_b and not can_a:
-                parent, child = b, a
-            else:
-                # symmetric or both disallowed -> textual direction, else stable
-                a_refs_b = b in refs_by_label.get(a, ())
-                b_refs_a = a in refs_by_label.get(b, ())
-                if a_refs_b and not b_refs_a:
+                can_a = can_have_child(a, b)  # a can have b as dependency
+                can_b = can_have_child(b, a)  # b can have a as dependency
+
+                if can_a and not can_b:
                     parent, child = a, b
-                elif b_refs_a and not a_refs_b:
+                elif can_b and not can_a:
                     parent, child = b, a
                 else:
-                    parent, child = a, b
+                    # symmetric or both disallowed -> textual direction, else stable
+                    a_refs_b = b in refs_by_label.get(a, ())
+                    b_refs_a = a in refs_by_label.get(b, ())
+                    if a_refs_b and not b_refs_a:
+                        parent, child = a, b
+                    elif b_refs_a and not a_refs_b:
+                        parent, child = b, a
+                    else:
+                        parent, child = a, b
 
-            children[parent].add(child)
+                children[parent].add(child)
+
+        else:
+            # PARTIAL recompute:
+            # - Start from existing dependencies as baseline.
+            # - Drop all edges touching any root label.
+            # - Rebuild edges only for pairs that involve at least one root.
+            children: dict[str, set[str]] = {lbl: set() for lbl in flat.keys()}
+
+            # Baseline from existing dependencies
+            for label, item in flat.items():
+                deps_raw = (item.get("dependencies") or "").strip()
+                if not deps_raw:
+                    continue
+                for tok in deps_raw.split(","):
+                    t = tok.strip()
+                    if not t:
+                        continue
+                    canon = canonical_by_upper.get(t.upper())
+                    if canon and canon in all_labels and canon.upper() != label.upper():
+                        children[label].add(canon)
+
+            roots_upper = {r.upper() for r in roots}
+
+            def is_root(label: str) -> bool:
+                return label.upper() in roots_upper
+
+            # Remove all edges that touch any root label; they will be recomputed.
+            for parent in list(children.keys()):
+                if is_root(parent):
+                    children[parent].clear()
+                else:
+                    children[parent] = {c for c in children[parent] if not is_root(c)}
+
+            # Pairs only where at least one endpoint is a root.
+            pair_set: set[frozenset[str]] = set()
+            for src, refs in refs_by_label.items():
+                for dst in refs:
+                    if dst not in all_labels:
+                        continue
+                    if not (is_root(src) or is_root(dst)):
+                        continue
+                    pair_set.add(frozenset((src, dst)))
+
+            # Orient these pairs and update children on top of baseline.
+            for pair in pair_set:
+                a, b = tuple(pair)
+
+                if self._bss_label_sort_key(b) < self._bss_label_sort_key(a):
+                    a, b = b, a
+
+                can_a = can_have_child(a, b)
+                can_b = can_have_child(b, a)
+
+                if can_a and not can_b:
+                    parent, child = a, b
+                elif can_b and not can_a:
+                    parent, child = b, a
+                else:
+                    a_refs_b = b in refs_by_label.get(a, ())
+                    b_refs_a = a in refs_by_label.get(b, ())
+                    if a_refs_b and not b_refs_a:
+                        parent, child = a, b
+                    elif b_refs_a and not a_refs_b:
+                        parent, child = b, a
+                    else:
+                        parent, child = a, b
+
+                children[parent].add(child)
 
         # 5) compute parents (dependants) as reverse of children
         parents: dict[str, set[str]] = {lbl: set() for lbl in flat.keys()}
@@ -1408,4 +1486,499 @@ Thanks :)
         out = {k: v for k, v in out.items() if v}
         return out
 
+
+    def _refine_proc_api_relationships(
+        self,
+        bss_schema: dict,
+        draft_roots: set[str],
+        llm_client,
+    ) -> tuple[dict, list[dict]]:
+        """
+        Second-pass relationship refinement for PROC <-> API edges.
+
+        - Only considers labels that:
+          - are in draft_roots AND are PROC or API, and
+          - any PROC/API directly connected to them via dependencies/dependants.
+        - Asks the LLM to decide the correct parent (dependant) for each
+          PROC/API pair and adjusts dependencies/dependants accordingly.
+        - Returns (updated_schema, updated_relationships_list).
+
+        updated_relationships_list is a list of:
+          { "label": ..., "dependencies": ..., "dependants": ... }
+        for all labels whose relationships were changed.
+        """
+        if not llm_client or not isinstance(bss_schema, dict) or not draft_roots:
+            return bss_schema, []
+
+        # 1) Flatten + type map
+        flat: dict[str, dict] = {}
+        label_types: dict[str, str] = {}
+
+        for label, item in self._iter_bss_items(bss_schema):
+            norm = self._normalize_bss_item(item)
+            if norm.get("cancelled") is True:
+                continue
+            flat[label] = norm
+            t = self._bss_label_type(label)
+            if t:
+                label_types[label] = t
+
+        if not flat:
+            return bss_schema, []
+
+        # Only PROC/API labels
+        proc_api_labels: set[str] = {
+            lbl
+            for lbl, t in label_types.items()
+            if t in ("PROC", "API")
+        }
+        if not proc_api_labels:
+            return bss_schema, []
+
+        # Draft items of family PROC/API that were emitted in this turn
+        modified_proc_api: set[str] = {
+            lbl for lbl in draft_roots if lbl in proc_api_labels
+        }
+        if not modified_proc_api:
+            return bss_schema, []
+
+        canonical_by_upper = {lbl.upper(): lbl for lbl in flat.keys()}
+
+        def _parse_csv_labels(csv_str: str) -> set[str]:
+            out: set[str] = set()
+            for part in (csv_str or "").split(","):
+                p = (part or "").strip()
+                if not p:
+                    continue
+                canon = canonical_by_upper.get(p.upper())
+                if canon:
+                    out.add(canon)
+            return out
+
+        # Neighbours restricted to PROC/API
+        neighbours: dict[str, set[str]] = {lbl: set() for lbl in proc_api_labels}
+        for lbl in proc_api_labels:
+            norm = flat[lbl]
+            deps = _parse_csv_labels(norm.get("dependencies", ""))
+            depants = _parse_csv_labels(norm.get("dependants", ""))
+            for other in deps | depants:
+                if other in proc_api_labels and other != lbl:
+                    neighbours[lbl].add(other)
+
+        # Modified PROC/API that actually touch another PROC/API
+        roots: set[str] = {
+            lbl for lbl in modified_proc_api if neighbours.get(lbl)
+        }
+        if not roots:
+            return bss_schema, []
+
+        # Segment-level references between PROC/API labels
+        segments_text, seg_refs_by_seg, label_refs = self._collect_segment_refs_for_proc_api(
+            flat,
+            label_types,
+            proc_api_labels,
+        )
+
+        # All PROC–API pairs where:
+        # - at least one endpoint is modified this turn (roots)
+        # - they are connected via deps/depants
+        candidate_pairs: set[frozenset[str]] = set()
+        for lbl in roots:
+            t_lbl = label_types.get(lbl)
+            if t_lbl not in ("PROC", "API"):
+                continue
+            for other in neighbours.get(lbl, set()):
+                t_other = label_types.get(other)
+                if t_other not in ("PROC", "API"):
+                    continue
+                if t_other == t_lbl:
+                    continue
+                candidate_pairs.add(frozenset((lbl, other)))
+
+        if not candidate_pairs:
+            return bss_schema, []
+
+        # Decide which pairs we will actually try to orient.
+        decision_pairs: set[frozenset[str]] = set()
+        dropped_pairs: set[frozenset[str]] = set()
+
+        roots_list = list(roots)
+
+        for pair in candidate_pairs:
+            a, b = tuple(pair)
+            # a,b could be in any order; just use label_refs symmetry
+            a_refs = label_refs.get(a, set())
+            b_refs = label_refs.get(b, set())
+
+            a_has_b = b in a_refs
+            b_has_a = a in b_refs
+            reciprocal = a_has_b and b_has_a
+
+            # "somebody else referencing them": another modified PROC/API
+            # whose segments mention either a or b
+            third_party = False
+            for lbl in roots_list:
+                if lbl in pair:
+                    continue
+                refs = label_refs.get(lbl, set())
+                if a in refs or b in refs:
+                    third_party = True
+                    break
+
+            if reciprocal:
+                # Safe to ask the model to orient this pair
+                decision_pairs.add(pair)
+            else:
+                if not third_party:
+                    # No reciprocal segment refs and nobody else anchors them:
+                    # too risky → don't even present this pair as a connection.
+                    dropped_pairs.add(pair)
+                else:
+                    # Keep as context only (via other items), but do NOT ask the
+                    # model to change this direct dependency.
+                    dropped_pairs.add(pair)
+
+        if not decision_pairs:
+            # No pair that we trust the model to touch
+            return bss_schema, []
+
+        # 3) Build data payload for the LLM
+        #    - only segments that actually reference other PROC/API labels
+        #    - adjacency lists exclude dropped_pairs
+        lines: list[str] = []
+
+        # adjacency for the prompt, excluding dropped pairs
+        # only maintain adjacency for ROOT labels (modified this turn)
+        adj_for_prompt: dict[str, set[str]] = {lbl: set() for lbl in roots}
+        for pair in candidate_pairs:
+            if pair in dropped_pairs:
+                continue
+            a, b = tuple(pair)
+            if a in adj_for_prompt:
+                adj_for_prompt[a].add(b)
+            if b in adj_for_prompt:
+                adj_for_prompt[b].add(a)
+
+        for lbl in sorted(roots, key=self._bss_label_sort_key):
+            t = label_types.get(lbl)
+            if t not in ("PROC", "API"):
+                continue
+
+            seg_refs = seg_refs_by_seg.get(lbl, {})
+            if not seg_refs:
+                # 4) If no segment references any PROC/API → transmit nothing
+                continue
+
+            opp_type = "API" if t == "PROC" else "PROC"
+            opp_neighbors = sorted(
+                [
+                    other
+                    for other in adj_for_prompt.get(lbl, set())
+                    if label_types.get(other) == opp_type
+                ],
+                key=self._bss_label_sort_key,
+            )
+
+            lines.append("## " + lbl)
+            lines.append(f"Type: {t}")
+
+            if opp_neighbors:
+                header = "Connected_APIs" if t == "PROC" else "Connected_PROCs"
+                lines.append(f"### {header}:")
+                for other in opp_neighbors:
+                    lines.append(f"- {other}")
+
+            # Only emit segments that reference at least one PROC/API label
+            segs_text = segments_text.get(lbl, {})
+            for seg_name, body in segs_text.items():
+                if seg_name not in seg_refs:
+                    continue
+                clean_name = seg_name.capitalize()
+                lines.append(f"**{clean_name}:**")
+                lines.append((body or "").strip() or "(empty)")
+
+            lines.append("")  # blank line
+
+        data_block = "\n".join(lines).strip()
+        if not data_block:
+            return bss_schema, []
+
+        prompt = f"""
+You resolve the direction of dependencies between processes (PROC-*) and APIs (API-*).
+
+Each item below is either a PROC or an API. For each item you see:
+- its label and family (PROC or API),
+- its full definition/notes,
+- the items of the opposite family it is directly connected with.
+
+For every connected PROC/API pair, decide which label is the PARENT (the dependant)
+and which is the CHILD (the dependency), using this convention:
+
+- Parent depends on child.
+- Children are dependencies.
+- Parents are dependants.
+
+HOW TO DECIDE
+
+Read the natural language around each PROC/API pair from BOTH sides.
+
+Think in terms of who CALLS whom:
+
+- The caller (initiator) is the PARENT (depends on the other).
+- The callee (implementation/handler) is the CHILD (dependency).
+
+Treat the PROCESS as PARENT and the API as CHILD when the text suggests the process is the caller or client, for example if it says the process:
+- "calls", "invokes", "uses", "sends requests to" the API, or
+- "uses <API> to do X", or
+- "sends an action to <API>", or
+- more generally: the process is the one initiating a request to that API.
+
+Treat the API as PARENT and the PROCESS as CHILD when the text suggests the API is only an inbound carrier whose requests are handled by the process, for example if it says the API:
+- is "implemented by", "handled by", "executed by", "backed by" that process, or
+- "receives a request and forwards it to <PROC>", or
+- "is consumed by <PROC>", "is routed to <PROC>", or
+- "<PROC> is the backend for <API>".
+
+If wording is vague ("works with", "interacts with", "connected to") and you cannot confidently tell who is the caller and who is the handler, skip that pair.
+
+Output rules (very important):
+
+- You may output zero or more lines. If the output is zero lines just return `None.`
+- Each line MUST have this exact format:
+
+  <LABEL_1>, <LABEL_2>: <PARENT_LABEL>
+
+- <LABEL_1> and <LABEL_2> must be the two labels of the pair (order does not matter).
+- <PARENT_LABEL> must be exactly one of <LABEL_1> or <LABEL_2>.
+- If you are not confident about a pair, DO NOT emit a line for it.
+- No extra text, no explanations, no code fences.
+
+Here is the data:
+
+{data_block}
+
+        """.strip()
+
+        from langchain_core.messages import HumanMessage
+
+        # Support both chat-style and completion-style clients.
+        if isinstance(llm_client, ChatLlmClient):
+            raw = llm_client.invoke([HumanMessage(content=prompt)])
+            raw_text = getattr(raw, "content", str(raw))
+        else:
+            # Assume a completion-style client that accepts a plain string.
+            raw_text = llm_client.invoke(prompt)
+
+        pairs = self._parse_comp_api_relationship_fixes(raw_text)
+        if not pairs:
+            return bss_schema, []
+
+        # Only allow orientations for pairs we explicitly marked as decision_pairs
+        allowed_pairs_upper = {
+            frozenset({a.upper(), b.upper()})
+            for (a, b) in (
+                tuple(p) for p in decision_pairs
+            )
+        }
+
+        # 4) Apply orientation decisions
+        touched: set[str] = set()
+
+
+        for a, b, parent in pairs:
+            a_canon = canonical_by_upper.get((a or "").strip().upper())
+            b_canon = canonical_by_upper.get((b or "").strip().upper())
+            parent_canon = canonical_by_upper.get((parent or "").strip().upper())
+
+            if not a_canon or not b_canon or not parent_canon:
+                continue
+            if a_canon not in proc_api_labels or b_canon not in proc_api_labels:
+                continue
+            if parent_canon not in (a_canon, b_canon):
+                continue
+            if a_canon == b_canon:
+                continue
+
+            pair_key_upper = frozenset({a_canon.upper(), b_canon.upper()})
+            if pair_key_upper not in allowed_pairs_upper:
+                # Either a dropped pair or completely unrelated to this turn
+                continue
+
+            # child is "the other one"
+            child_canon = a_canon if parent_canon == b_canon else b_canon
+
+            self._override_dependency_edge(bss_schema, parent_canon, child_canon)
+            touched.add(parent_canon)
+            touched.add(child_canon)
+
+        if not touched:
+            return bss_schema, []
+
+        # 5) Build updated_relationships payload for the client
+        updated_relationships: list[dict] = []
+        for lbl in sorted(touched, key=self._bss_label_sort_key):
+            section = self._bss_section_for_label(lbl)
+            if not section:
+                continue
+            item = self._normalize_bss_item(
+                (bss_schema.get(section) or {}).get(lbl) or {}
+            )
+            updated_relationships.append(
+                {
+                    "label": lbl,
+                    "dependencies": item.get("dependencies", ""),
+                    "dependants": item.get("dependants", ""),
+                }
+            )
+
+        return bss_schema, updated_relationships
+
+    def _collect_segment_refs_for_proc_api(
+        self,
+        flat: dict[str, dict],
+        label_types: dict[str, str],
+        proc_api_labels: set[str],
+    ) -> tuple[dict, dict, dict]:
+        """
+        For each PROC/API label:
+        - split its definition into segments
+        - for each segment, collect which other PROC/API labels it references
+        Returns:
+          segments_text[label][seg_name] -> text
+          seg_refs_by_seg[label][seg_name] -> set[labels]
+          label_refs[label] -> set[labels]  (union over segments)
+        """
+        segments_text: dict[str, dict] = {}
+        seg_refs_by_seg: dict[str, dict] = {}
+        label_refs: dict[str, set] = {}
+
+        for lbl in proc_api_labels:
+            norm = flat.get(lbl) or {}
+            definition = (norm.get("definition") or "").strip()
+
+            segs = self._split_definition_segments(definition)
+            if not segs:
+                segs = {"definition": definition}
+
+            segments_text[lbl] = {}
+            seg_refs_by_seg[lbl] = {}
+            label_refs[lbl] = set()
+
+            for seg_name, seg_body in segs.items():
+                body = seg_body or ""
+                segments_text[lbl][seg_name] = body
+
+                if not body.strip():
+                    continue
+
+                refs = self._extract_reference_labels_from_definition(body)
+                refs_in_family = {r for r in refs if r in proc_api_labels}
+                if not refs_in_family:
+                    continue
+
+                seg_refs_by_seg[lbl][seg_name] = refs_in_family
+                label_refs[lbl].update(refs_in_family)
+
+        return segments_text, seg_refs_by_seg, label_refs
+
+
+    def _parse_comp_api_relationship_fixes(self, raw: str) -> list[tuple[str, str, str]]:
+        """
+        Parse lines of the form:
+
+            LABEL_1, LABEL_2: PARENT_LABEL
+
+        Returns a list of (label1, label2, parent_label).
+        """
+        out: list[tuple[str, str, str]] = []
+        text = (raw or "").replace("\r\n", "\n").replace("\r", "\n")
+        for ln in text.split("\n"):
+            s = (ln or "").strip()
+            if not s:
+                continue
+            if s.startswith("#"):
+                continue
+            # very tolerant split: first comma, then colon
+            if "," not in s or ":" not in s:
+                continue
+            left, parent_part = s.split(":", 1)
+            parent_label = parent_part.strip()
+            first, second = left.split(",", 1)
+            l1 = first.strip()
+            l2 = second.strip()
+            if not (l1 and l2 and parent_label):
+                continue
+            if not (self._is_bss_label(l1) and self._is_bss_label(l2) and self._is_bss_label(parent_label)):
+                continue
+            out.append((l1, l2, parent_label))
+        return out
+
+    def _override_dependency_edge(self, bss_schema: dict, parent: str, child: str) -> None:
+        """
+        Force orientation of the edge between parent and child:
+
+        - parent depends on child
+        - child has parent as dependant
+
+        Other dependencies/dependants remain unchanged.
+        """
+        if not isinstance(bss_schema, dict):
+            return
+
+        section_p = self._bss_section_for_label(parent)
+        section_c = self._bss_section_for_label(child)
+        if not section_p or not section_c:
+            return
+
+        bss_schema.setdefault(section_p, {})
+        bss_schema.setdefault(section_c, {})
+
+        item_p = self._normalize_bss_item((bss_schema[section_p].get(parent) or {}))
+        item_c = self._normalize_bss_item((bss_schema[section_c].get(child) or {}))
+
+        def _parse_csv_list(csv_str: str) -> list[str]:
+            parts = []
+            seen = set()
+            for part in (csv_str or "").split(","):
+                p = (part or "").strip()
+                if not p:
+                    continue
+                key = p.upper()
+                if key in seen:
+                    continue
+                seen.add(key)
+                parts.append(p)
+            return parts
+
+        # current lists
+        deps_p = _parse_csv_list(item_p.get("dependencies", ""))
+        deps_c = _parse_csv_list(item_c.get("dependencies", ""))
+        deps_p = [x for x in deps_p if x.upper() != child.upper()]
+        deps_c = [x for x in deps_c if x.upper() != parent.upper()]
+
+        depants_p = _parse_csv_list(item_p.get("dependants", ""))
+        depants_c = _parse_csv_list(item_c.get("dependants", ""))
+        depants_p = [x for x in depants_p if x.upper() != child.upper()]
+        depants_c = [x for x in depants_c if x.upper() != parent.upper()]
+
+        # add parent -> child dependency
+        if all(x.upper() != child.upper() for x in deps_p):
+            deps_p.append(child)
+        # ensure child has parent as dependant
+        if all(x.upper() != parent.upper() for x in depants_c):
+            depants_c.append(parent)
+
+        # sort for stability
+        deps_p_sorted = sorted(deps_p, key=self._bss_label_sort_key)
+        deps_c_sorted = sorted(deps_c, key=self._bss_label_sort_key)
+        depants_p_sorted = sorted(depants_p, key=self._bss_label_sort_key)
+        depants_c_sorted = sorted(depants_c, key=self._bss_label_sort_key)
+
+        item_p["dependencies"] = ",".join(deps_p_sorted)
+        item_p["dependants"] = ",".join(depants_p_sorted)
+        item_c["dependencies"] = ",".join(deps_c_sorted)
+        item_c["dependants"] = ",".join(depants_c_sorted)
+
+        bss_schema[section_p][parent] = item_p
+        bss_schema[section_c][child] = item_c
 
