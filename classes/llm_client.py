@@ -1,10 +1,106 @@
-from typing import Any, Dict, List, Optional, Tuple
+import asyncio
+import threading
+import random
+import time
+import traceback
+from typing import Callable, TypeVar, Any, Dict, List, Optional, Tuple
 
 from openai import OpenAI
 from langchain_google_vertexai import VertexAI, ChatVertexAI
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 from classes.model_props import parse_model_name, is_openai_model, estimate_cost_usd
+
+T = TypeVar("T")
+
+
+class MaxRetryErrorsException(Exception):
+    pass
+
+
+# Global backoff state (shared across all clients)
+_global_backoff_lock = threading.Lock()
+_global_wait_until = 0.0
+_global_backoff_seconds = 30.0
+_GLOBAL_BACKOFF_MAX = 600.0
+
+
+def call_with_retries_sync(
+    fn: Callable[[], T],
+    *,
+    retries: int = 3,
+    timeout_threshold: float = 50.0,
+    log: Callable[[str], None] | None = None,
+) -> T:
+    """
+    Run a sync LLM call with global 429/timeout backoff + retries.
+    """
+    last_exception: Exception | None = None
+
+    def _is_timeout_error(e: Exception) -> bool:
+        if isinstance(e, asyncio.TimeoutError):
+            return True
+        msg = repr(e)
+        return "TimeoutError" in msg or "timed out" in msg.lower()
+
+    def _is_resource_exhausted_error(e: Exception) -> bool:
+        msg = str(e)
+        return (
+            "429" in msg
+            and (
+                "RESOURCE_EXHAUSTED" in msg
+                or "Resource has been exhausted" in msg
+                or "Too Many Requests" in msg
+            )
+        )
+
+    def _respect_global_backoff() -> None:
+        while True:
+            with _global_backoff_lock:
+                now = time.monotonic()
+                wait = _global_wait_until - now
+            if wait <= 0:
+                return
+            time.sleep(min(wait, 1.0))
+
+    def _register_429_and_get_delay() -> float:
+        global _global_wait_until, _global_backoff_seconds
+
+        with _global_backoff_lock:
+            now = time.monotonic()
+            base = _global_backoff_seconds
+            delay = random.uniform(base * 0.95, base * 1.35)
+            _global_backoff_seconds = min(_global_backoff_seconds * 2, _GLOBAL_BACKOFF_MAX)
+            _global_wait_until = max(_global_wait_until, now + delay)
+            return delay
+
+    def _reset_backoff_on_success() -> None:
+        global _global_backoff_seconds
+        _global_backoff_seconds = max(1.0, _global_backoff_seconds * 0.5)
+
+    for attempt in range(retries):
+        _respect_global_backoff()
+        start_time = time.time()
+        try:
+            result = fn()
+            _reset_backoff_on_success()
+            return result
+        except Exception as e:
+            elapsed = time.time() - start_time
+            last_exception = e
+
+            if _is_resource_exhausted_error(e) or _is_timeout_error(e):
+                delay = _register_429_and_get_delay()
+                msg = f"Attempt {attempt+1} got 429/timeout, backing off ~{delay:.1f}s."
+            else:
+                msg = f"Attempt {attempt+1} failed."
+
+            if log:
+                log(f"{msg} (elapsed={elapsed:.2f}s): {e}\n{traceback.format_exc()}")
+
+            # optional: if elapsed > timeout_threshold and you want special logging, it's already covered above
+
+    raise MaxRetryErrorsException(f"All {retries} retry attempts failed.") from last_exception
 
 
 class BaseLlmClient:
@@ -67,20 +163,22 @@ class BaseLlmClient:
                 completion_tokens=int(inc["candidates_token_count"]),
                 # model_configuration=getattr(self, "model_configuration", None),
                 service_tier=None,
-            )
+            )[1]
         if self.last_usage is None:
             self.last_usage = inc
             return
         for k, v in inc.items():
             self.last_usage[k] = (self.last_usage.get(k, 0) or 0) + (v or 0)
 
-    def get_accrued_cost(self):
+    def get_accrued_cost(self) -> float:
         if not self.last_usage:
-            return  0.0
-        else:
-            return self.last_usage.get("accrued_cost", 0.0)
+            return 0.0
+        return float(self.last_usage.get("accrued_cost", 0.0))
 
-
+    def get_accrued_usage(self):
+        if not self.last_usage:
+            return 0.0
+        return float(self.last_usage)
 
 class LlmClient(BaseLlmClient):
     """
@@ -99,8 +197,10 @@ class LlmClient(BaseLlmClient):
         *,
         vertex_project: str,
         vertex_region: str,
+        timeout: float | None = None,
     ):
         self.provider = "openai" if is_openai_model(model_name) else "vertex"
+        self._timeout = timeout
         self.model_name = model_name
         self.last_usage: Optional[Dict[str, int]] = None
         self._openai_params = None
@@ -110,19 +210,23 @@ class LlmClient(BaseLlmClient):
                 project=vertex_project,
                 location=vertex_region,
                 model_name=model_name,
+                timeout=timeout,
             )
             self._client = None
         elif self.provider == "openai":
             self._vertex = None
             self.model_name, self._openai_params = parse_model_name(self.model_name)
-            self._client = OpenAI()
+            client_kwargs: Dict[str, Any] = {"max_retries": 0}
+            if timeout is not None:
+                client_kwargs["timeout"] = timeout
+
+            self._client = OpenAI(**client_kwargs)
         else:
             raise ValueError(f"Unknown LLM provider: {self.provider}")
 
-    def invoke(self, prompt: str) -> str:
+    def _invoke_once(self, prompt: str) -> str:
         """
-        Synchronous call, returns a plain string.
-        Backend already knows how to handle str vs .content, so str is fine.
+        Single HTTP call without retries/backoff.
         """
         if self.provider == "vertex":
             resp = self._vertex.invoke(prompt)
@@ -153,6 +257,16 @@ class LlmClient(BaseLlmClient):
         text = getattr(resp, "output_text", "") or ""
         return text.strip()
 
+    def invoke(self, prompt: str, *, retries: int = 3) -> str:
+        """
+        Synchronous call with global 429/timeout backoff + retries.
+        """
+        return call_with_retries_sync(
+            lambda: self._invoke_once(prompt),
+            retries=retries,
+            log=lambda msg: print(f"[LLM-RETRY] {msg}"),
+        )
+
 
 class ChatLlmClient(BaseLlmClient):
     """
@@ -171,23 +285,30 @@ class ChatLlmClient(BaseLlmClient):
         *,
         vertex_project: str,
         vertex_region: str,
+        timeout: float | None = None,
     ):
         self.provider = "openai" if is_openai_model(model_name) else "vertex"
         self.model_name = model_name
+        self._timeout = timeout
         self.last_usage: Optional[Dict[str, int]] = None
         self._openai_params = None
 
         if self.provider == "vertex":
-            self._vertex = ChatVertexAI (
+            self._vertex = ChatVertexAI(
                 project=vertex_project,
                 location=vertex_region,
                 model_name=model_name,
+                timeout=timeout,
             )
             self._client = None
         elif self.provider == "openai":
             self._vertex = None
             self.model_name, self._openai_params = parse_model_name(self.model_name)
-            self._client = OpenAI()
+            client_kwargs: Dict[str, Any] = {"max_retries": 0}
+            if timeout is not None:
+                client_kwargs["timeout"] = timeout
+
+            self._client = OpenAI(**client_kwargs)
         else:
             raise ValueError(f"Unknown LLM provider: {self.provider}")
 
@@ -195,8 +316,8 @@ class ChatLlmClient(BaseLlmClient):
         out: List[Dict[str, str]] = []
         for m in messages:
             if isinstance(m, SystemMessage):
-                role = "developer"
-            if isinstance(m, HumanMessage):
+                role = "developer"  # or "system" if you prefer
+            elif isinstance(m, HumanMessage):
                 role = "user"
             elif isinstance(m, AIMessage):
                 role = "assistant"
@@ -205,9 +326,9 @@ class ChatLlmClient(BaseLlmClient):
             out.append({"role": role, "content": str(m.content)})
         return out
 
-    def invoke(self, messages: List[HumanMessage | AIMessage]) -> str:
+    def _invoke_once(self, messages: List[HumanMessage | AIMessage]) -> str:
         """
-        Synchronous chat call, returns text.
+        Single HTTP call without retries/backoff.
         """
         if self.provider == "vertex":
             resp = self._vertex.invoke(messages)
@@ -237,3 +358,18 @@ class ChatLlmClient(BaseLlmClient):
 
         text = getattr(resp, "output_text", "") or ""
         return text.strip()
+
+    def invoke(
+        self,
+        messages: List[HumanMessage | AIMessage],
+        *,
+        retries: int = 3,
+    ) -> str:
+        """
+        Synchronous chat call with global 429/timeout backoff + retries.
+        """
+        return call_with_retries_sync(
+            lambda: self._invoke_once(messages),
+            retries=retries,
+            log=lambda msg: print(f"[CHAT-LLM-RETRY] {msg}"),
+        )

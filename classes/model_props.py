@@ -87,7 +87,7 @@ def estimate_cost_usd(
     # !VertexAI Models
     elif pricing.get("long_threshold_tokens", None) is not None and pricing.get("input_long", None) is not None:
         # decide which band to use
-        if prompt_tokens > pricing.long_threshold_tokens:
+        if prompt_tokens > pricing["long_threshold_tokens"]:
             print(f"\033[93m\033[3mlong_threshold_tokens\033[0m")
             in_rate = pricing["input_long"]
             out_rate = pricing["output_long"] if pricing["output_long"] is not None else pricing["output_short"]

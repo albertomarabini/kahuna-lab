@@ -154,14 +154,21 @@ C) Label family semantics (hard rule)
   - When SOURCE_TEXT names or strongly implies a host runtime (“webserver”, “worker”, “mobile app process”, etc.), the responsibilities ledger MUST record that PROC-* “runs on COMP-*”.
   - By design each PROC-* is intended to:
     - run on exactly one COMP-* host, and
-    - list the UI-*, API-*, INT-*, ENT-* it directly uses.
+    - list the UI-*, API-*, INT-*, ENT-* it directly interacts with in a calleee/caller relationship.
+        - Depending on architecture:
+            - PROC-* can directly interact with UI-* (eg: mobile, windows apps) but is important to distinct when a PROC-* will be mediated by an API-* instead in this relationship
+            - PROC-* will only implement outbound INT-*
+        - Being simply the locus where the code of an API-* is implemented (the server handler behind that API-*) but the API-* itself is used to trigger another PROC soesn't qualify for a callee/caller relationship.
   - Do NOT create PROC-* for external systems; those are always expressed via INT-* + (optionally) API-* boundaries we own.
 
 - INT-*:
-  - External capability surface / outbound integration boundary owned by an external system.
-  - INT-* appears only as an interaction point in Flow (a locus where a PROC-* calls out to an external system); the external system behind it is not a first-class actor in our ledger.
-  - It is allowed for an interaction chain to end on INT-* (Primary Actor → … → INT-*).
-  - INT-* is never hosted on a COMP-* we own but, the interaction with it is implemented by at least one PROC-* (the internal process that uses/handles that integration); UC_EXTRACTOR records this only when SOURCE_TEXT makes it clear and otherwise leaves it as a gap (no invention of owners).
+  - External capability surface / integration boundary owned by an external system.
+  - INT-* appears only as an interaction point in Flow:
+      - when a PROC-* calls out to an external system (outbound: `PROC-* calls INT-*`), or
+      - when an external system calls one of our API-* endpoints (inbound: `INT-* calls API-*, API-* triggers PROC-*`).
+  - It is allowed for an interaction chain to start or end on INT-* (Primary Actor → … → INT-* or INT-* → …).
+  - INT-* is never hosted on a COMP-* we own; the interaction with it is implemented by at least one PROC-* and/or API-* that UC_EXTRACTOR records only when SOURCE_TEXT makes this clear (no invention of owners).
+  - When SOURCE_TEXT clearly states who initiates the interaction, UC_EXTRACTOR should mirror that with explicit directional verbs in Flow sentences (e.g. “PROC-1_Redirect_To_Stripe_on_buy calls INT-1_Stripe_Hosted_Form”, “INT-2_Stripe_Payment_Events calls API-3_Stripe_Webhook_Endpoint”) instead of generic “integration happens”.
 
 - COMP-*:
   - Runtime execution substrate that hosts/executes parts or all of our internal logic or persistence.
@@ -203,11 +210,12 @@ C) Label family semantics (hard rule)
 
 - API-*:
   - Internal programmatic boundary we own: endpoints, webhook receivers, RPC operations exposed by a COMP-* we operate.
-  - API-* can serve both:
-    - inbound integrations (external systems calling us trough a INT-* surface, e.g. webhooks), and
-    - internal or UI clients (e.g. browser/mobile calling our HTTP APIs).
-  - API-* appears in Flow as a carrier between callers (UI-* or external systems) and PROC-*.
-  - API-* is always hosted on some COMP-* and implemented by one PROC-*, consumed by at least one PROC-* or UI-* or external system.
+  - API-* can be called by both:
+    - inbound integrations (INT-* inbound), and
+    - internal or UI clients (UI-*, PROC-*).
+  - when API-* appears in Flow as a carrier between callers (UI-* or external systems surface INT-*) to a PROC-* It should describe who calls it directly without compressing the communication flow (`INT-* calls API-*, API-* triggers PROC-*`, `UI-* calls API-*, API-* triggers PROC-*`)
+  - It should describe which PROC-* implements it using explicit verbs (“implemented by”) instead of abstract “dependency” wording.
+  - API-* is always hosted on some COMP-*. Possibly we should identify what is the PROC-* server handler behind that API-*. Most importantly we shoul identify which PROC-* or UI-* or INT-* the API-* is consumed/called by.
     - When SOURCE_TEXT makes host or handler explicit (“/checkout endpoint on the webserver handled by checkout service”), record those relationships in the responsibilities ledger.
     - When consumers are named (UI-* or “Stripe webhook infrastructure”), record that consumption as well.
     - UC_EXTRACTOR MUST NOT invent paths, hosts, or consumers; absent evidence, leave gaps to be filled later.
@@ -324,7 +332,9 @@ For each transition, extract the carrier (if stated) and classify:
 
 - UI-*  : human-facing surfaces (screen/panel/button/key/CLI/file-as-input).
 - API-* : programmatic boundary we own (endpoint/webhook/RPC operation) exposed by a specific runtime and consumed either by other internal runtimes or external inbound integration called by an INT-* (eg:Stripe Webhhoks)
-- INT-* : external capability surface (Stripe, vendor API, hardware interface) we interact with either inbound (we call a API-* service interface  from an INT-* point of interaction) or outbound (an external system INT-* interaction surface is called trough a PROC-* that implements the integration)
+- INT-* : external capability surface (Stripe, vendor API, hardware interface) we interact with specifying that is:
+    - outbound, when a PROC-* calls the external surface (`PROC-* calls INT-*`), and
+    - inbound, when the external system calls one of our API-* endpoints (`INT-* calls API-*`).
 
 Runtime boundary discipline:
 - Only record handoffs that cross UI/API/INT carriers.
@@ -342,7 +352,7 @@ CLASSIFICATION RULE (hard):
 - If the carrier is a programmatic boundary exposed by us (endpoint/webhook/RPC), mint API-*.
 - If human facing mint UI-* (keys/buttons/screens/CLI).
 - The external surface (if any) is INT-*; the carrier inside our boundary is UI-* or API-*.
-- INT-* is an outbound interaction point that describes the presence of an actor - external vendor, that we don't describe directly in our document, but is mentioned everywhere is involved
+- INT-* is an interaction point that describes the presence of an external vendor; it can be outbound (we call them) or inbound (they call our API-*), but the vendor itself is not a first-class actor in our ledger.
 
 Step 6 — Identify secondary actors (COMP-*) when constrained or strongly implied by SOURCE_TEXT
 Create COMP-* when SOURCE_TEXT names or even minimally constrains/mentions runtime/substrate:
@@ -373,7 +383,7 @@ Step 9 — Transform PRD narrative into a Labeled Definition
 
 2) — Translate the same narrative into labels (same sentences, now labeled)
 For each sentence in Step 1:
-- Replace subjects with ROLE-* / PROC-* (only internal).
+- Replace subjects with ROLE-* / PROC-* (only internal), and when interactions with UI-*, API-* or INT-* are described, prefer explicit directional verbs like “clicks”, “calls”, “triggers”, “redirects to”, “calls INT-…”, “INT-… calls API-…” instead of generic “the system handles X”.
 - Replace carriers with UI-* / API-* / INT-* (per boundary discipline).
 - Replace durable records with ENT-* only if implied.
 - Attach COMP-* hosting only when the narrative names/constrains the runtime (“webserver”, “worker host”, “Unity runtime”, etc.).
@@ -416,9 +426,11 @@ EXAMPLE — PRD → OUTPUT TRANSLATION (CALIBRATION ONLY; DO NOT COPY CONTENT)
 =====================================================================
 
 UC narrative (natural language that can be found inside the document)
-"The user clicks buy on the UI. The webserver set the current user cart for checkout, calculates the total and redirects the browser to the stripe hosted payment form.
+"The user clicks buy on the UI.
+The webserver set the current user cart for checkout, calculates the total and redirects the browser to the stripe hosted payment form.
 Once the payment is performed Stripe redirects the user back to the website  on a page that will wait for the payment status to be cleared.
-In the meanwhile our webhook worker will receive notification from stripe that the payment happened with some metadata that will identify the cart object being paid (or not paid) depending on the outcome.
+In the meanwhile we will recive events from stripe and store them in our Database.
+Our webhook worker will parse those event notifications from stripe: when the payment happened, using the metadata attached to it, will identify the cart object being paid (or not paid) depending on the outcome and the worker will update the status.
 The waiting page will read the payment state of the Cart being processed and depending on the outcome will redirect the user either to a payment succesful page or somewhere else"
 
 Let's translate this in terms of labels:
@@ -427,7 +439,8 @@ Let's translate this in terms of labels:
 The PROC-1_Redirect_To_Stripe_on_buy that lives on COMP-1_Webserver sets the current user cart ENT-1_User_Cart status field to "checkout", calculates the total, will ask Stripe for an intention_id record value using INT-5_Stripe_PaymentIntent_Create and attached to the corresponding intention_id field in the  ENT-1_User_Cart.
 It will use the INT-1_Stripe_Hosted_Form_URL endpoint to elaborate the URL to send the browser to the stripe hosted Form, operation that will be performed by the UI-1_Cart_Panel.
 Once the payment is performed Stripe redirects the user back to the website  on a page UI-2_Checkout_Waiting_Room that will poll for the status field of the ENT-1_User_Cart to be get in a final state using the API-1_Internal_Cart_Status.
-In the meanwhile our webhook worker PROC-2_Webhook_worker that lives in the COMP-2_Webhook_Processor will receive notification from Stripe trough the API-2_Stripe_Webhook_Endpoint that the payment happened with some metadata that will identify the current user cart ENT-1_User_Cart and modify the status field object as "paid" or "not paid" (final states)
+Stripe Noitifications are sent trough the INT-3_Stripe_Webhook_Client that will call our API-2_Stripe_Webhook_Endpoint that will store those received events in ENT-2_Stripe_Events.
+Our webhook worker PROC-2_Webhook_worker that lives in the COMP-2_Webhook_Processor will process notification events in ENT-2_Stripe_Events. When a notification that the payment happened will appear with some metadata that will identify the current user cart ENT-1_User_Cart, PROC-2_Webhook_worker will modify the status field of ENT-1_User_Cart as "paid" or "not paid" (final states)
 Depending on the outcome (and in the second case also clearing the intention_id field). The waiting page will read the payment state of the ENT-1_User_Cart being processed using the API-3_Internal_Cart_Status_Read and depending on the outcome will redirect the user either to the UI-3_Payment_Succesful page or somewhere else"
 
 UC-3_Browser_Checkout_Via_Stripe_Hosted_Form_And_Webhook_Finalization
@@ -444,7 +457,7 @@ UC-3_Browser_Checkout_Via_Stripe_Hosted_Form_And_Webhook_Finalization
   - PROC-1_Redirect_To_Stripe_on_buy uses INT-1_Stripe_Hosted_Form_URL to build the redirect URL; UI-1_Cart_Panel redirects the browser to the Stripe hosted form.
   - After payment, Stripe redirects the user back to UI-2_Checkout_Waiting_Room.
   - UI-2_Checkout_Waiting_Room polls ENT-1_User_Cart.status via API-1_Internal_Cart_Status.
-  - PROC-2_Webhook_worker (on COMP-2_Webhook_Processor) receives payment notification via API-2_Stripe_Webhook_Endpoint being called by INT-3_Stripe_Webhook_Client.
+  - PROC-2_Webhook_worker (on COMP-2_Webhook_Processor) receives payment notification via API-3_Stripe_Webhook_Endpoint being called by INT-3_Stripe_Webhook_Client.
   - PROC-2_Webhook_worker identifies ENT-1_User_Cart and sets ENT-1_User_Cart.status="paid" or "not_paid" (and clears ENT-1_User_Cart.intention_id if "not_paid").
   - UI-2_Checkout_Waiting_Room reads final status via API-3_Internal_Cart_Status_Read.
   - UI-2_Checkout_Waiting_Room redirects the browser to UI-3_Payment_Succesful or UI-4_Payment_Failure_Destination.
@@ -453,6 +466,7 @@ UC-3_Browser_Checkout_Via_Stripe_Hosted_Form_And_Webhook_Finalization
   - UI-1_Cart_Panel: exposes buy action; performs browser redirect to hosted payment form.
   - PROC-1_Redirect_To_Stripe_on_buy: runs on COMP-1_Webserver; sets cart to checkout; computes total; requests/stores intention_id; builds redirect URL.
   - ENT-1_User_Cart: stores status and intention_id; intention_id cleared on not_paid.
+  - ENT-2_Stripe_Events: stores Stripe events + metadata.
   - INT-2_Stripe_PaymentIntent_Create: external capability returning a payment intention identifier.
   - INT-1_Stripe_Hosted_Form_URL: external capability providing hosted payment form destination URL.
   - INT-3_Stripe_Webhook_Client: System used by stripe to callback directly our system.
@@ -579,14 +593,19 @@ Epistemic-1 Label family semantics
   - When SOURCE_TEXT names or strongly implies a host runtime (“webserver”, “worker”, “mobile app process”, etc.), the responsibilities ledger MUST record that PROC-* “runs on COMP-*”.
   - By design each PROC-* is intended to:
     - run on exactly one COMP-* host, and
-    - list the UI-*, API-*, INT-*, ENT-* it directly uses.
+    - list the UI-*, API-*, INT-*, ENT-* it directly interacts with. Depending on architecture:
+        - PROC-* can directly interact with UI-* (eg: mobile, windows apps) but is important to distinct when a PROC-* will be mediated by an API-* instead in this relationship
+        - PROC-* will only implement inbound INT-*
   - Do NOT create PROC-* for external systems; those are always expressed via INT-* + (optionally) API-* boundaries we own.
 
 - INT-*:
-  - External capability surface / integration boundary owned by an external system.
+  - External capability surface / integration boundary owned by an external system we integrate with.
   - INT-* appears only as an interaction point in Flow (a locus where a PROC-* calls out to an external system or where an API-* is called from outside); the external system behind it is not a first-class actor in our ledger.
-  - It is allowed for an interaction chain to end on INT-* (Primary Actor → … → INT-*).
-  - INT-* is never hosted on a COMP-* we own but, the interaction with it is implemented by at least one PROC-* (the internal process that uses/handles that integration); UC_EXTRACTOR records this only when SOURCE_TEXT makes it clear and otherwise leaves it as a gap (no invention of owners).
+  - It is allowed for an interaction chain to end or start on INT-* (Primary Actor → … → INT-* or INT-* → … ).
+  - The interaction with INT-* is implemented by at least one PROC-* or API-* (the internal process/boundary that uses/handles that integration); record this only when SOURCE_TEXT makes it clear and otherwise leave it as a gap (no invention of owners).
+  - When SOURCE_TEXT clearly implies who initiates the interaction, treat this as evidence for `kind`:
+    - `"outbound"` when a PROC-* calls into an external INT-* surface,
+    - `"inbound"` when an external system surface INT-* calls one of our API-* endpoints.
 
 - COMP-*:
   - Runtime execution substrate that hosts/executes parts or all of our internal logic or persistence.
@@ -617,7 +636,7 @@ Epistemic-1 Label family semantics
 - UI-*:
   - Internal interaction gateway (interaction carrier) that allows a ROLE-* to trigger/observe system behavior.
   - UI-* is an artifact independent of which COMP-* hosts it (client app, server-rendered UI, desktop app, etc.).
-  - UI-* might trigger internal PROC-* directly (eg: Windows/mobile apps) or throiugh the mediation of an API-* (WebApps) or even live in a mixed architecture
+  - UI-* might trigger internal PROC-* directly (eg: Windows/mobile apps) or through the mediation of an API-* (WebApps) or even live in a system with mixed architecture, and should describe these interactions with concrete verbs (“calls API-1”, “triggers PROC-3”) rather than generic “the system handles it”
   - UI-* MUST NOT be used for external / third-party hosted surfaces (those are INT-*) or for process-level boundaries (those are PROC-* / API-*).
   - UI-* appears in Flow as the carrier for human actions, for feedback surfaces (success, error, loading, state changes) and other information that is displayed to the user in order for him to take an informed decision and appropriate action.
   - For each UI-* that appears, UC_EXTRACTOR should, when SOURCE_TEXT allows, tie it to:
@@ -629,10 +648,11 @@ Epistemic-1 Label family semantics
 
 - API-*:
   - Internal programmatic boundary we own: endpoints, webhook receivers, RPC operations exposed by a COMP-* we operate.
-  - API-* can serve both:
-    - inbound integrations (external systems rappresented by an INT-* calling us, e.g. webhooks), and
-    - internal or UI clients (e.g. browser/mobile calling our HTTP APIs).
-  - API-* appears in Flow as a carrier between callers (UI-* or external systems) and PROC-*.
+  - API-* can be called by both:
+    - inbound integrations (INT-* inbound), and
+    - internal or UI clients (UI-*, PROC-*).
+  - when API-* appears in Flow as a carrier between callers (UI-* or external systems surface INT-*) to a PROC-* It should describe who calls it directly without compressing the relational flow.
+  - It should describe which PROC-* implements it using explicit verbs (“implemented by”) instead of abstract “dependency” wording.
   - API-* is always hosted on some COMP-* and implemented by one PROC-*, consumed by at least one PROC-* or UI-* or INT-*.
     - When SOURCE_TEXT makes host or handler explicit (“/checkout endpoint on the webserver handled by checkout service”), record those relationships in the responsibilities ledger.
     - When consumers are named (UI-* or “Stripe webhook infrastructure”), record that consumption as well.
@@ -647,7 +667,11 @@ Epistemic-1 Label family semantics
 
 
 - You MUST NOT create PROC-* or COMP-* for an external system.
-  - External system like Stripe, payment gateway, robot sensor module ARE System we describe only through the interaction we have with them using an service interaction surface (INT-*) either Inbound (INT-* -> API-*) or Outbound (PROC-* -> INT-*) but are not actors rappresented in our ledger
+    - External systems like Stripe, payment gateways, robot sensor modules are systems we describe only through the interaction we have with them, either:
+       - Inbound (`INT-* -> API-*`), when the external system calls us, or
+       - Outbound (`PROC-* -> INT-*`), when we call the external system.
+    They are not actors represented in our ledger.
+
 - External UI surfaces are NOT UI-*.
   - If the interaction surface is hosted/owned by an external system (e.g., Stripe hosted checkout page, vendor console, third-party device UI),
     represent it as INT-* (a capability surface of that external boundary), not as UI-*.
@@ -697,6 +721,7 @@ Epistemic Stance
   - Do not add default security/privacy patterns (least privilege, admin elevation, etc.) unless the user explicitly states them.
   - **Never “repair” gaps by guessing mechanisms, defaults, flows, or structures; keep them visible as gaps until the user fills or waives them.**
 
+- Use detailed but concise, highly technical, LLM-readable language with explicit interaction verbs such as “calls”, “is implemented by”, “triggers”, “redirects to” to avid any misunderstandig over objects relations (ownership, callee/caller relationships etc)
 ## 2. `open_items`
 
 In addition to each segment allowed in the conceptual content of each item, you can introduce a single `open_items` segment per item.
@@ -751,7 +776,9 @@ Segments:
 - contract: key fields/contracts,
 - snippets: code/pseudocode snippets,
 - notes: contextual notes or extended definition
-- kind: used only for Comps, defines the kind of runtime surface (service/worker/job/client/datastore/adapter)
+- kind:
+     - for COMP-*: defines the kind of runtime surface (service/worker/job/client/datastore/adapter)
+     - for INT-*: defines the direction of interaction (`inbound` or `outbound`) as seen from our system
 
 **ONLY THE SEGMENTS WITHIN THIS GROUP SPECIFIED in THE Epistemic-2 format rules are allowed for output**
 ** You are not allowed to create custom segments in your output**
@@ -768,10 +795,10 @@ Treating each newly emitted Epistemic-2 definition as a standalone mini-spec and
 
 Concretely:
 - Treat CURRENT_BSS_CONTEXT as the in-progress graph your output for ITEMS_OF_FAMILY accrues upon.
-- Do not rephrase or restate flows, note or definitions that are already captured in CURRENT_BSS_CONTEXT but build/references upon them.
+- Do not restate flows, notes or definitions that are already captured in CURRENT_BSS_CONTEXT but build/references upon them.
 - When defining an item in ITEMS_OF_FAMILY:
   - Align with the UC_BLOCKS story as already encoded in CURRENT_BSS_CONTEXT.
-  - Avoid “fresh narrations” that duplicate existing flows in different words.
+  - Avoid “fresh narrations” that duplicate existing flows in different words: extend and refine the existing narrative topology rather than rewriting it, by referencing the components that originate it.
 
 Use detailed but concise, highly technical, LLM-readable language.
 Definitions must be globally consistent with CURRENT_BSS_CONTEXT while staying locally precise for each ITEM_OF_FAMILY.
@@ -813,10 +840,12 @@ epistemic_2_rules = {
   - `flow`: numbered internal steps, each naming
 
     - which runtime component/process acts upon which trigger,
-    - what it calls/consumes (UI/API/INT/entity),
-    - what state change/effect/message it produces.
+    - what it calls/consumes (UI/API/INT/ENT)
+    - what state change/effect/message it produces,
+    - and, when other PROC-*, API-*, INT-* or UI-* appear, to avoid potential misunderstandings use explicit verbs such as “calls”, “invokes”, “is implemented by”, “is fed by”, “hands off to” that illustrate the action direction/subject of the phrase
+    - Do not use generic “the system does X” or even generic graph jargon like “depends on”, “parent”, “child” here.
   - `snippets`: any code/pseudocode the user gives or asks for that belongs to this orchestration.
-  - `notes`: the COMP-* hosting it, responsibilities, invariants, and behavioral constraints of this workflow (not generic platform rules).
+  - `notes`: the COMP-* hosting it, responsibilities, invariants, and behavioral constraints and any extra narrative about how it interacts with UI-*, API-*, INT-*, and ENT-* that does not fit naturally in the main `flow`.
 
 - Examples w output format:
 ````
@@ -874,19 +903,20 @@ high: define retry/backoff policy when downstream PROC-10/PROC-11/PROC-12 fail w
 ````
 
 - Key rules:
+  - When other PROC-*, API-*, INT-* or UI-* appear, use explicit verbs such as “calls”, “invokes”, “is implemented by”, “is fed by”, “hands off to” instead of generic “the system does X”.
   - Each PROC-* **MUST** specify on what COMP-* is running (CRITICAL) and any API-* it interacts with.
   - By finalization, each PROC-* should mention the INT-*, API-*, UI-* surfaces and entities it actually uses/runs/implements/interacts with.
   - Do **not** create separate PROC-* items merely because there are alternative paths (success vs failure vs compensation) inside the same workflow; model those as flow branches within a single process unless the user clearly separates them.
-  - Depending on architecture a non secondary detail is that API-* are not always needed for the interaction between an UI-* and a PROC-* (eg: mobile or windows apps)
+  - Depending on architecture, API-* may or may not sit between UI-* and PROC-* (eg: mobile or windows apps): when UI-* talks directly to a PROC-* (e.g. mobile/desktop apps), say so explicitly in the PROC-* `flow`/`notes`
 """,
     "COMP":"""
 
 ### COMP-* Components (~Emergent; runtime coordinate system, center of gravity B)
 
 - Essence:
-  - Concrete runtime artifacts we operate(services, workers, jobs, clients, adapters, datastores) that host processes, surfaces, integrations, and data.
-- COMP-* is the primary runtime coordinate system: conceptually treat its `References` as the main place where ownership and usage edges are expressed. Other items may also reference their owners; the host still treats all edges symmetrically when building the graph.
-- One of the main objectives of this process is to create a list of COMP-* detailing all the PROC-* and API-* running on them, all the ENT-* they host, all the UI-* they serve.
+    - Concrete runtime artifacts we operate(services, workers, jobs, clients, adapters, datastores) that host processes, surfaces, integrations, and data.
+    - COMP-* is the primary runtime coordinate system: conceptually treat its `notes` as the main place where we list which PROC-*, API-*, UI-*, ENT-* and INT-* “live” here.
+    - COMP-* have a passive role, they don't act upon things but only hosts, serves, there
 - Minimum content:
   - `definition`: what this runtime artifact is, its main responsibility, what classes of work it performs.
   - `kind`: one of `service / worker / job / client / datastore / adapter`.
@@ -983,7 +1013,10 @@ med: clarify if anonymous/guest users are supported or if a user account is alwa
   - `notes`:
 
     * key user actions available here,
-    * how those actions map to system actions (API-*/PROC-*),
+    * how, depending on architecture, those actions map to system actions (API-*/PROC-*/INT-*) **DIRECTLY** and without mediation:
+        - UI-* Can interact directly with PROC-* depending on architecture (e.g. mobile/desktop apps) or they might need the mediation of an API-*
+        - UI-* Can act upon INT-* directly (make a call to an external service) or they can have that call mediated.
+        **WHAT COUNTS IS THAT THESE INTERACTIONS ARE NOT COMPRESSED/CRUNCHED and that UI-*clearly declares what its primary interaction lies , using verbs like “calls API-1_Checkout”, “triggers PROC-3_LocalFlow”, “initiates INT-2_Stripe_Payment_Events”.**
     * main feedback states the user sees (success, errors, loading, critical state changes).
     * What other information the UI-* exposes to the User
 
@@ -1026,9 +1059,9 @@ med: clarify whether the cart panel also lets the user change quantities or remo
 - Key rules:
   - Ownership at creation is mandatory:
     - When a UI surface appears, you MUST mention:
-      - An existing PROC-* or COMP-* serving/executing that surface (or a high-severity gap recorded) as soon as the surface is introduced.
+      - An existing PROC-* and/or COMP-* serving/executing that surface (or a high-severity gap recorded) as soon as the surface is introduced.
       - At least one ROLE-* using this surface (or a high-severity gap recorded) as soon as the surface is introduced.
-      - The list API-* it interacts with
+      - The list API-*/INT-* it calls directly
       - The list of PROC-* that are triggered directly without an API-* mediation depending on architecture(eg: Mobile Apps, Desktop Apps)
   - Each UI flow must expose at least one explicit “system action” (trigger that can be actioned by the user) once known; if missing, record this as a UI gap instead of inventing a carrier.
   - UI items might contain multiple displayed items and actions: while the process of requirement gathering progresses they must all be collected
@@ -1051,7 +1084,8 @@ med: clarify whether the cart panel also lets the user change quantities or remo
 
     - whether this record is system-of-record here or mirrored from an external system
     - high-level lifecycle (e.g. “draft → active → archived”) when it matters for flows.
-    - When possible on what COMP-* is stored
+    - Which COMP-* stores it.
+    - any composition with other ENT-* by the relation parent/child as PK/FK
 
 
 - Examples w output format:
@@ -1098,13 +1132,15 @@ low: define whether historical carts are archived or deleted and how that affect
 
 - Essence: boundary contracts for integrations with external systems (often asynchronous, with explicit expectations on messages/behavior).
     - It can be inbound (when the INT-* will call an API-* endpoint we expose) or outbound (when a PROC-* calls the INT-* surface exposed by an external system/vendor)
-    - We must create an INT-* for each surface we call or we are called by
+    - We must create an INT-* for each surface we interface with (we call or we are called by)
 
 - Minimum conceptual content:
   - `definition`: which external system this is and what we use it for.
+  - `kind`: `outbound` if we call into the external system, `inbound` if it calls into us.
   - `notes`:
 
     - the kind of messages or operations involved (e.g. “payments”, “inventory sync”),
+    - who initiates the interaction in plain language (“PROC-1_Redirect_To_Stripe_on_buy calls Stripe”, “Stripe calls API-3_Stripe_Webhook_Endpoint”),
     - any high-level constraints the user states about how we must talk to it (e.g. “must use their hosted checkout”).
 
 - Example Output:
@@ -1113,6 +1149,9 @@ low: define whether historical carts are archived or deleted and how that affect
 
 - [definition]:
 Stripe Checkout Session used to present a hosted payment page to ROLE-1_User during UC-1_Cart_Checkout.
+
+- [kind]:
+outbound
 
 - [notes]:
 PROC-1_Redirect_To_Stripe_on_buy calls INT-1_Stripe_Hosted_Form to create the checkout session with metadata identifying ENT-1_User_Cart. UI-1_Cart_Panel then redirects ROLE-1_User’s browser to the session URL so payment happens on Stripe’s side.
@@ -1124,6 +1163,9 @@ med: clarify which PROC-* is the primary owner of calls to INT-1_Stripe_Hosted_F
 
 - [definition]:
 Stripe webhook integration used to receive asynchronous payment and checkout events from Stripe for UC-1_Cart_Checkout.
+
+- [kind]:
+inbound
 
 - [notes]:
 INT-2_Stripe_Payment_Events calls API-3_Stripe_Webhook_Endpoint exposed by COMP-1_Public_API_Service whenever Stripe delivers events such as checkout.session.completed or payment_intent.succeeded. PROC-4_Handle_Stripe_Payment_Event runs on COMP-1_Public_API_Service, validates the Stripe signature, looks up ENT-1_User_Cart and ENT-2_Payment using metadata, and updates local state (for example, mark cart as paid and create ENT-3_Order). No ROLE-* interacts directly with this integration; processing is fully backend-driven.
@@ -1138,8 +1180,8 @@ high: enumerate which Stripe event types must be handled and what each should do
   - If an external system is system-of-record for a concept, mark that boundary and avoid inventing internal entities unless the user confirms local persistence.
   - Do not invent retry policies or SLAs; keep unknowns as gaps.
   - Ownership and placement rule:
-    - When an integration is first introduced, explicitly ask which PROC-* implements it; if unknown, introduce a minimal PROC-* placeholder and keep direction/ownership as a high- or med-severity gap.
-    - By finalization, each active INT-* MUST reference exactly one PROC-* that performs or handles the interaction.
+    - When an integration is first introduced, explicitly ask which PROC-* implements it (outbound) or API-* will be called by it depending on Kind; if unknown, introduce a minimal PROC-* or API-* placeholder and keep ownership as a high- severity gap.
+    - By finalization, each active INT-* MUST reference exactly one PROC-* or API-* that performs or handles the interaction.
 
 """,
 
@@ -1162,6 +1204,7 @@ high: enumerate which Stripe event types must be handled and what each should do
 
     - what the endpoint guarantees when it reports success/failure,
     - any specific error behaviors that matter for callers’ flows.
+    - which PROC-* implements this API (“implemented by PROC-1_Redirect_To_Stripe_on_buy”) and which UI-*, PROC-* or INT-* typically call it, using explicit verbs (“called by UI-1_Cart_Panel”, “called by INT-2_Stripe_Payment_Events”)
 
 Examples:
 ````
@@ -1202,8 +1245,8 @@ Error responses:
 - Key rules:
    - When an API endpoint is first introduced, explicitly ask the PROC-* that implements it; if none exists yet, PROC-* placeholder and record the ownership as a gap.
    - By finalization, each active API-* MUST mention to at least one PROC-* or UI-* that actually consumes it, or an External system INT-* inbound integration that uses it as integration point.
-
 """,
+
     "NFR":"""
 ### NFR-* (non-functional requirements; Required minimal set, Optional additions)
 
@@ -1243,7 +1286,7 @@ med: decide how violations of NFR-1_Payments_Consistency are detected and surfac
     - the initiating intent (why the primary actor starts this scenario), and
     - the end condition that they would consider a successful outcome.
   - `flow`: A detailed main flow from initial triggers → outcome, with:
-    - the chain of Initiator → Signal → Receiver → Reaction → Change is composed of
+    - the chain of Initiator → Signal → Receiver → Reaction → Change is composed of, using explicit item labels (ROLE-*, UI-*, API-*, PROC-*, INT-*, ENT-*),
     - key alternative/exception paths
   - `notes`: Pre/postconditions only if they materially matter.
 
@@ -1546,614 +1589,614 @@ EXTRACTED_UCS:
 
 
 
-BSS_UC_CONNECTED_IDS_CSV_PROMPT = r"""
-You are BSS_UC_CONNECTED_IDS_CSV: a deterministic labeler.
-
-Task
-Given RAW_UC_LIST (UC extractor output), emit ONLY CSV lists of objects connected to each Usecase:
-<UC_LABEL>:<CONNECTED_ID_1>,<CONNECTED_ID_2>,...,<CONNECTED_ID_N>
-
-Where CONNECTED_ID_* are BSS labels (ROLE-*/COMP-*/INT-*/API-*/UI-*/ENT-*) connected to that UC.
-
-Hard rules
-- Evidence-only: create objects ONLY if explicitly present in RAW_UC_LIST (actors, secondary actors, interaction points, or explicit record/table tokens in Change clauses).
-- No domain autopilot; no extra objects.
-- Output ONLY CSV rows (no commentary, no headers, no JSON, no registry/index section).
-- Deterministic: the same RAW_UC_LIST must always yield the same labels and same rows.
-- Labels must follow:
-  UC-<n>_<NAME>, ROLE-<n>_<NAME>, COMP-<n>_<NAME>, INT-<n>_<NAME>, API-<n>_<NAME>, UI-<n>_<NAME>, ENT-<n>_<NAME>
-  where <NAME> matches [A-Za-z0-9_]+.
-
-Canonicalization
-- Canonicalize(any string) => replace non [A-Za-z0-9] with '_' then collapse multiple '_' and trim '_' ends.
-- Comparisons/sorting are case-insensitive; tie-break by original canonical string.
-
-UC labeling (preserve extractor index; never double-index)
-- UC header format is: "UC<k>_<Slug...>"
-- Parse:
-  - k = integer after "UC" up to first "_"
-  - slug = substring after the first "_"
-- UC_LABEL = "UC-" + k + "_" + Canonicalize(slug)
-- Do NOT include "UC<k>_" inside the suffix.
-
-Harvest (per UC block)
-Extract exactly from these lines (when present):
-- Primary actors: [ ... ]
-- Secondary actors: [ ... ]
-- Interaction points: [ ... ]
-Also scan each Transition line and extract Change(...) text.
-
-ENT candidates (explicit only)
-- From interaction points "DB:<name>" => ENT name = <name> (canonicalize).
-- From Change text: if it contains "<name> row" or "<name> table" where <name> matches [A-Za-z0-9_]+ => ENT name = <name>.
-- Do NOT create ENT from vague “data exists” without a named token.
-
-Classify actors -> ROLE / INT / COMP
-ROLE (human roles only)
-- If actor name contains any whole-word token (case-insensitive): User, Admin, Operator, Player, Resident, Citizen, Staff, Agent, Manager => ROLE.
-
-Internal keyword override (forces COMP unless ROLE)
-- If actor name contains any of: Service, Controller, Processor, Handler, WebhookProcessor, Worker, Job, Coordinator, SystemController => COMP.
-
-INT (external system)
-- If actor name is explicitly an external system/vendor by evidence in RAW_UC_LIST:
-  - Appears explicitly (e.g., "Stripe") in Primary/Secondary actors, OR
-  - Appears as prefix in interaction points like "<Vendor>Event:", OR
-  - Responsibilities mention external behavior (emits event, hosts UI, processes payment, creates customer) AND internal keyword override does not apply.
-- UC initiator token rule:
-  - The initiator token is the substring between "UC<k>_" and the next "_" (or end).
-  - If initiator token ends with "Client" and does NOT match internal keyword override => classify that actor as INT.
-
-COMP (internal acting subject or substrate)
-- Any Primary actor not classified as ROLE or INT => COMP.
-- Any Secondary actor containing (case-insensitive): Database, Datastore, FileSystem, OS, Platform, Runtime => COMP.
-- Other Secondary actors: include ONLY if explicitly present in RAW_UC_LIST; classify using INT rules if clearly vendor/system, else COMP.
-
-Interaction points -> API / UI / ENT
-API
-- If interaction point starts with "API:" OR contains "<METHOD> /path" where METHOD in {GET,POST,PUT,PATCH,DELETE}:
-  - Canonical API name = METHOD + "_" + canonicalized path tokens
-  - Path tokenization: split on "/" ; remove "{" and "}" ; keep inner tokens (e.g., "{user_id}" => "user_id")
-  - Example: "API:POST /users/{user_id}/stripe/customer" => "POST_users_user_id_stripe_customer"
-- If interaction point matches "<Vendor>Event:<event...>":
-  - Canonical API name = Vendor + "Event_" + event string canonicalized
-  - Example: "StripeEvent:checkout.session.completed(type=consumption_deposit)" => "StripeEvent_checkout_session_completed_type_consumption_deposit"
-
-UI
-- If interaction point starts with "UIAction:" OR ends with "Action" and is clearly human interaction => UI name = canonicalized interaction point.
-ENT
-- If interaction point starts with "DB:" => ENT name = token after "DB:".
-
-Label minting (global; across ALL UCs)
-1) Build global unique sets of canonical names per family: ROLE, COMP, INT, API, UI, ENT.
-2) Sort each family set lexicographically (case-insensitive).
-3) Assign sequential numbers starting at 1 within each family:
-   ROLE-<n>_<NameSlug>
-   COMP-<n>_<NameSlug>
-   INT-<n>_<NameSlug>
-   API-<n>_<NameSlug>
-   UI-<n>_<NameSlug>
-   ENT-<n>_<NameSlug>
-
-Per-UC connected IDs
-For each UC:
-- Connected IDs include all labels for:
-  - ROLE actors in that UC
-  - COMP actors/substrates in that UC
-  - INT actors/systems in that UC
-  - API interaction points in that UC
-  - UI interaction points in that UC
-  - ENT candidates in that UC
-- Deduplicate connected IDs.
-- Sort connected IDs lexicographically by full label string (case-insensitive).
-
-CSV emission (STRICT)
-- Emit one line per UC, in ascending UC index order k.
-- CSV line format:
-  UC_LABEL:<CONNECTED_ID_1>,<CONNECTED_ID_2>,...,<CONNECTED_ID_N>
-- If a UC has zero connected IDs, emit only:
-  UC_LABEL
-
-INPUT
-<<<
-{ucs}
->>>
-"""
-
-BSS_OBJECT_ROWS_FROM_UCS_NO_REFERENCES_PROMPT_V2 = r"""
-You are BSS_OBJECT_ROWS_FROM_UCS_NO_REFERENCES: a deterministic, evidence-only compiler.
-
-You must follow ONLY the BSS_SHARED_SCHEMA rules below, with one explicit exception:
-- You MUST NOT emit any "References:" segment inside definition. The HOST will build References.
-
-INPUTS (REQUIRED)
-1) BSS_SHARED_SCHEMA (authoritative)
-2) RAW_UC_LIST: a list of UC blocks. Each UC block MUST start with a UC label in BSS form:
-   "UC-<n>_<NAME>"
-   and includes (when available):
-   - Primary actors: [ ... ]
-   - Secondary actors: [ ... ]
-   - Interaction points: [ ... ]
-   - Transitions (Signal → Reaction → Change): ...
-   - Responsibilities ledger: ...
-3) CONNECTED_INDEX: lines of the form:
-   <CONNECTED_ID>:<UC_LABEL_1>,<UC_LABEL_2>,...,<UC_LABEL_N>
-   Where UC_LABEL_i MUST exactly match UC labels present in RAW_UC_LIST.
-
-OUTPUT (STRICT)
-- Output ONLY BSS Item rows, one per CONNECTED_ID, in this exact single-line grammar:
-  <LABEL>:"status":"<empty|partial|complete|waived>","definition":"<...>","open_items":"<...>","ask_log":"<...>","cancelled":<true|false>
-- One physical line per item. No extra lines, no commentary.
-
-HARD RULES (NON-NEGOTIABLE)
-A) Evidence-only
-- Use ONLY text that is explicitly present in RAW_UC_LIST + CONNECTED_INDEX.
-- Do NOT invent responsibilities, mechanisms, contracts, policies, error semantics, permissions, or architecture.
-
-B) No relationships / no graph work
-- Do NOT compute or infer dependencies.
-- Do NOT reference any other object labels anywhere.
-- Do NOT emit References. The HOST will attach relationships.
-
-C) ID hygiene
-- BSS labels (UC-*, COMP-*, ROLE-*, INT-*, API-*, UI-*, ENT-*, NFR-*) MUST NOT appear anywhere inside:
-  - definition
-  - open_items
-  - ask_log
-(They may appear only as the row’s leading <LABEL>, which is required.)
-
-D) Definition formatting (without References)
-- definition is a single string made of segments separated by " | ".
-- Allowed segments: Definition, Flow, Contract, Snippets, Outcomes, Decision, Notes.
-- You MUST NOT use the segment name "References".
-
-E) Code-like containment
-- Do NOT include any code-like tokens (endpoints, event strings, DB table tokens, schemas) unless they appear verbatim in RAW_UC_LIST AND you place them inside Contract: or Snippets:.
-- This compiler does NOT need to emit Contract/Snippets unless the responsibility text itself is impossible to state without them.
-- Never place braces '{' or '}' outside Contract/Snippets.
+# BSS_UC_CONNECTED_IDS_CSV_PROMPT = r"""
+# You are BSS_UC_CONNECTED_IDS_CSV: a deterministic labeler.
+
+# Task
+# Given RAW_UC_LIST (UC extractor output), emit ONLY CSV lists of objects connected to each Usecase:
+# <UC_LABEL>:<CONNECTED_ID_1>,<CONNECTED_ID_2>,...,<CONNECTED_ID_N>
+
+# Where CONNECTED_ID_* are BSS labels (ROLE-*/COMP-*/INT-*/API-*/UI-*/ENT-*) connected to that UC.
+
+# Hard rules
+# - Evidence-only: create objects ONLY if explicitly present in RAW_UC_LIST (actors, secondary actors, interaction points, or explicit record/table tokens in Change clauses).
+# - No domain autopilot; no extra objects.
+# - Output ONLY CSV rows (no commentary, no headers, no JSON, no registry/index section).
+# - Deterministic: the same RAW_UC_LIST must always yield the same labels and same rows.
+# - Labels must follow:
+#   UC-<n>_<NAME>, ROLE-<n>_<NAME>, COMP-<n>_<NAME>, INT-<n>_<NAME>, API-<n>_<NAME>, UI-<n>_<NAME>, ENT-<n>_<NAME>
+#   where <NAME> matches [A-Za-z0-9_]+.
+
+# Canonicalization
+# - Canonicalize(any string) => replace non [A-Za-z0-9] with '_' then collapse multiple '_' and trim '_' ends.
+# - Comparisons/sorting are case-insensitive; tie-break by original canonical string.
+
+# UC labeling (preserve extractor index; never double-index)
+# - UC header format is: "UC<k>_<Slug...>"
+# - Parse:
+#   - k = integer after "UC" up to first "_"
+#   - slug = substring after the first "_"
+# - UC_LABEL = "UC-" + k + "_" + Canonicalize(slug)
+# - Do NOT include "UC<k>_" inside the suffix.
+
+# Harvest (per UC block)
+# Extract exactly from these lines (when present):
+# - Primary actors: [ ... ]
+# - Secondary actors: [ ... ]
+# - Interaction points: [ ... ]
+# Also scan each Transition line and extract Change(...) text.
+
+# ENT candidates (explicit only)
+# - From interaction points "DB:<name>" => ENT name = <name> (canonicalize).
+# - From Change text: if it contains "<name> row" or "<name> table" where <name> matches [A-Za-z0-9_]+ => ENT name = <name>.
+# - Do NOT create ENT from vague “data exists” without a named token.
+
+# Classify actors -> ROLE / INT / COMP
+# ROLE (human roles only)
+# - If actor name contains any whole-word token (case-insensitive): User, Admin, Operator, Player, Resident, Citizen, Staff, Agent, Manager => ROLE.
+
+# Internal keyword override (forces COMP unless ROLE)
+# - If actor name contains any of: Service, Controller, Processor, Handler, WebhookProcessor, Worker, Job, Coordinator, SystemController => COMP.
+
+# INT (external system)
+# - If actor name is explicitly an external system/vendor by evidence in RAW_UC_LIST:
+#   - Appears explicitly (e.g., "Stripe") in Primary/Secondary actors, OR
+#   - Appears as prefix in interaction points like "<Vendor>Event:", OR
+#   - Responsibilities mention external behavior (emits event, hosts UI, processes payment, creates customer) AND internal keyword override does not apply.
+# - UC initiator token rule:
+#   - The initiator token is the substring between "UC<k>_" and the next "_" (or end).
+#   - If initiator token ends with "Client" and does NOT match internal keyword override => classify that actor as INT.
+
+# COMP (internal acting subject or substrate)
+# - Any Primary actor not classified as ROLE or INT => COMP.
+# - Any Secondary actor containing (case-insensitive): Database, Datastore, FileSystem, OS, Platform, Runtime => COMP.
+# - Other Secondary actors: include ONLY if explicitly present in RAW_UC_LIST; classify using INT rules if clearly vendor/system, else COMP.
+
+# Interaction points -> API / UI / ENT
+# API
+# - If interaction point starts with "API:" OR contains "<METHOD> /path" where METHOD in {GET,POST,PUT,PATCH,DELETE}:
+#   - Canonical API name = METHOD + "_" + canonicalized path tokens
+#   - Path tokenization: split on "/" ; remove "{" and "}" ; keep inner tokens (e.g., "{user_id}" => "user_id")
+#   - Example: "API:POST /users/{user_id}/stripe/customer" => "POST_users_user_id_stripe_customer"
+# - If interaction point matches "<Vendor>Event:<event...>":
+#   - Canonical API name = Vendor + "Event_" + event string canonicalized
+#   - Example: "StripeEvent:checkout.session.completed(type=consumption_deposit)" => "StripeEvent_checkout_session_completed_type_consumption_deposit"
+
+# UI
+# - If interaction point starts with "UIAction:" OR ends with "Action" and is clearly human interaction => UI name = canonicalized interaction point.
+# ENT
+# - If interaction point starts with "DB:" => ENT name = token after "DB:".
+
+# Label minting (global; across ALL UCs)
+# 1) Build global unique sets of canonical names per family: ROLE, COMP, INT, API, UI, ENT.
+# 2) Sort each family set lexicographically (case-insensitive).
+# 3) Assign sequential numbers starting at 1 within each family:
+#    ROLE-<n>_<NameSlug>
+#    COMP-<n>_<NameSlug>
+#    INT-<n>_<NameSlug>
+#    API-<n>_<NameSlug>
+#    UI-<n>_<NameSlug>
+#    ENT-<n>_<NameSlug>
+
+# Per-UC connected IDs
+# For each UC:
+# - Connected IDs include all labels for:
+#   - ROLE actors in that UC
+#   - COMP actors/substrates in that UC
+#   - INT actors/systems in that UC
+#   - API interaction points in that UC
+#   - UI interaction points in that UC
+#   - ENT candidates in that UC
+# - Deduplicate connected IDs.
+# - Sort connected IDs lexicographically by full label string (case-insensitive).
+
+# CSV emission (STRICT)
+# - Emit one line per UC, in ascending UC index order k.
+# - CSV line format:
+#   UC_LABEL:<CONNECTED_ID_1>,<CONNECTED_ID_2>,...,<CONNECTED_ID_N>
+# - If a UC has zero connected IDs, emit only:
+#   UC_LABEL
+
+# INPUT
+# <<<
+# {ucs}
+# >>>
+# """
+
+# BSS_OBJECT_ROWS_FROM_UCS_NO_REFERENCES_PROMPT_V2 = r"""
+# You are BSS_OBJECT_ROWS_FROM_UCS_NO_REFERENCES: a deterministic, evidence-only compiler.
+
+# You must follow ONLY the BSS_SHARED_SCHEMA rules below, with one explicit exception:
+# - You MUST NOT emit any "References:" segment inside definition. The HOST will build References.
+
+# INPUTS (REQUIRED)
+# 1) BSS_SHARED_SCHEMA (authoritative)
+# 2) RAW_UC_LIST: a list of UC blocks. Each UC block MUST start with a UC label in BSS form:
+#    "UC-<n>_<NAME>"
+#    and includes (when available):
+#    - Primary actors: [ ... ]
+#    - Secondary actors: [ ... ]
+#    - Interaction points: [ ... ]
+#    - Transitions (Signal → Reaction → Change): ...
+#    - Responsibilities ledger: ...
+# 3) CONNECTED_INDEX: lines of the form:
+#    <CONNECTED_ID>:<UC_LABEL_1>,<UC_LABEL_2>,...,<UC_LABEL_N>
+#    Where UC_LABEL_i MUST exactly match UC labels present in RAW_UC_LIST.
+
+# OUTPUT (STRICT)
+# - Output ONLY BSS Item rows, one per CONNECTED_ID, in this exact single-line grammar:
+#   <LABEL>:"status":"<empty|partial|complete|waived>","definition":"<...>","open_items":"<...>","ask_log":"<...>","cancelled":<true|false>
+# - One physical line per item. No extra lines, no commentary.
+
+# HARD RULES (NON-NEGOTIABLE)
+# A) Evidence-only
+# - Use ONLY text that is explicitly present in RAW_UC_LIST + CONNECTED_INDEX.
+# - Do NOT invent responsibilities, mechanisms, contracts, policies, error semantics, permissions, or architecture.
+
+# B) No relationships / no graph work
+# - Do NOT compute or infer dependencies.
+# - Do NOT reference any other object labels anywhere.
+# - Do NOT emit References. The HOST will attach relationships.
+
+# C) ID hygiene
+# - BSS labels (UC-*, COMP-*, ROLE-*, INT-*, API-*, UI-*, ENT-*, NFR-*) MUST NOT appear anywhere inside:
+#   - definition
+#   - open_items
+#   - ask_log
+# (They may appear only as the row’s leading <LABEL>, which is required.)
+
+# D) Definition formatting (without References)
+# - definition is a single string made of segments separated by " | ".
+# - Allowed segments: Definition, Flow, Contract, Snippets, Outcomes, Decision, Notes.
+# - You MUST NOT use the segment name "References".
+
+# E) Code-like containment
+# - Do NOT include any code-like tokens (endpoints, event strings, DB table tokens, schemas) unless they appear verbatim in RAW_UC_LIST AND you place them inside Contract: or Snippets:.
+# - This compiler does NOT need to emit Contract/Snippets unless the responsibility text itself is impossible to state without them.
+# - Never place braces '{' or '}' outside Contract/Snippets.
 
-F) Determinism
-- Stable ordering: emit rows sorted by CONNECTED_ID lexicographically (case-insensitive).
-- Stable open_items numbering for newly created content: OI-1, OI-2, OI-3.
+# F) Determinism
+# - Stable ordering: emit rows sorted by CONNECTED_ID lexicographically (case-insensitive).
+# - Stable open_items numbering for newly created content: OI-1, OI-2, OI-3.
 
-COMPILATION LOGIC (PER CONNECTED_ID)
-1) Identify object human name
-- object_name = substring after the first "_" in CONNECTED_ID (keep underscores).
-  Example: "COMP-8_PostgreSQLDatabase" => object_name "PostgreSQLDatabase"
+# COMPILATION LOGIC (PER CONNECTED_ID)
+# 1) Identify object human name
+# - object_name = substring after the first "_" in CONNECTED_ID (keep underscores).
+#   Example: "COMP-8_PostgreSQLDatabase" => object_name "PostgreSQLDatabase"
 
-2) Collect UC text
-- From CONNECTED_INDEX, get the UC label list U for this CONNECTED_ID.
-- For each UC label in U, locate the UC block in RAW_UC_LIST whose header matches that label EXACTLY.
-- If one or more UC blocks are missing, do NOT guess. Just note a missing-fact open_item (no UC labels).
+# 2) Collect UC text
+# - From CONNECTED_INDEX, get the UC label list U for this CONNECTED_ID.
+# - For each UC label in U, locate the UC block in RAW_UC_LIST whose header matches that label EXACTLY.
+# - If one or more UC blocks are missing, do NOT guess. Just note a missing-fact open_item (no UC labels).
 
-3) Extract evidence about this object
-From the collected UC blocks, extract ONLY these evidence forms:
-- Responsibilities ledger bullet that begins with this object’s actor token (exact match after trimming), e.g.:
-  "PostgreSQLDatabase: stores consent history + active flag"
-- Transition lines where the object_name appears as a named actor inside Signal(...) or Reaction(...) or Change(...), if present.
-If nothing explicitly mentions the object beyond it being connected, treat responsibilities as unspecified.
+# 3) Extract evidence about this object
+# From the collected UC blocks, extract ONLY these evidence forms:
+# - Responsibilities ledger bullet that begins with this object’s actor token (exact match after trimming), e.g.:
+#   "PostgreSQLDatabase: stores consent history + active flag"
+# - Transition lines where the object_name appears as a named actor inside Signal(...) or Reaction(...) or Change(...), if present.
+# If nothing explicitly mentions the object beyond it being connected, treat responsibilities as unspecified.
 
-4) Synthesize definition (minimal, technical, no labels)
-- If you have at least one explicit responsibility sentence for this object:
-  Definition: <deduped + compressed responsibility clauses (1–4 clauses max)>
-- Else:
-  Definition: <Family> '<object_name>' (responsibilities unspecified)
-Family words:
-  ROLE => "Role"
-  COMP => "Runtime component"
-  INT  => "External system"
-  API  => "API operation"
-  UI   => "UI surface"
-  ENT  => "Record"
-  NFR  => "Non-functional constraint"
+# 4) Synthesize definition (minimal, technical, no labels)
+# - If you have at least one explicit responsibility sentence for this object:
+#   Definition: <deduped + compressed responsibility clauses (1–4 clauses max)>
+# - Else:
+#   Definition: <Family> '<object_name>' (responsibilities unspecified)
+# Family words:
+#   ROLE => "Role"
+#   COMP => "Runtime component"
+#   INT  => "External system"
+#   API  => "API operation"
+#   UI   => "UI surface"
+#   ENT  => "Record"
+#   NFR  => "Non-functional constraint"
 
-- You MAY add "Notes:" only if RAW_UC_LIST explicitly states a nuance about this object that is not already in the responsibility clauses.
-- Do NOT add other segments unless strictly necessary.
+# - You MAY add "Notes:" only if RAW_UC_LIST explicitly states a nuance about this object that is not already in the responsibility clauses.
+# - Do NOT add other segments unless strictly necessary.
 
-5) status
-- status="complete" ONLY if at least one explicit responsibility sentence for this object was extracted from UC text AND there are no open_items.
-- Otherwise status="partial".
+# 5) status
+# - status="complete" ONLY if at least one explicit responsibility sentence for this object was extracted from UC text AND there are no open_items.
+# - Otherwise status="partial".
 
-6) open_items (1–3 max, missing facts only, no labels)
-- If any connected UC text was missing:
-  include: OI-1 high: Missing: source use case text for one or more connected use cases
-- If responsibilities were unspecified:
-  add a family-appropriate missing-fact:
-    ROLE: Missing: role responsibilities and intent
-    COMP: Missing: component responsibilities (what it provides/does)
-    INT:  Missing: what this external system is used for
-    API:  Missing: operation purpose and success/failure guarantees
-    UI:   Missing: surface purpose and user-visible feedback
-    ENT:  Missing: what this record represents
-    NFR:  Missing: constraint statement
-- Use bracketed list format: [OI-1 high: ...; OI-2 med: ...]
-- If nothing is missing, open_items="[]".
-
-7) ask_log
-- Always: [Ingested: synthesized responsibilities from connected use cases (count=<N>)]
-  where <N> is the number of UC labels listed for this CONNECTED_ID in CONNECTED_INDEX.
-- Do NOT include any labels or UC names.
-
-8) cancelled
-- Always emit cancelled:false.
-
-INPUTS
-BSS_SHARED_SCHEMA:
-<<<
-{BSS_SHARED_SCHEMA}
->>>
-
-RAW_UC_LIST:
-<<<
-PASTE UC BLOCKS HERE
->>>
-
-CONNECTED_INDEX:
-<<<
-PASTE CONNECTED_ID:UC_LABEL,... LINES HERE
->>>
-"""
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-BSS_MIN_INGESTOR_PROMPT_V2 = r"""
-You are BSS_MIN_INGESTOR: a compiler-only ingestion agent.
-
-Goal:
-- Translate SOURCE_TEXT into a minimal requirements ledger.
-- Output only: LABEL + status + definition (no References, open_items, ask_log, cancelled).
-- Cold-data only: write ONLY facts/constraints/choices explicitly stated in SOURCE_TEXT. No invention, no “improvement”.
-
-HOST PREPROCESSOR CONTRACT (AUTHORITATIVE)
-- The host will replace any literal newline characters that appear INSIDE quoted strings with the two-character sequence \n BEFORE splitting lines.
-- Therefore: you may include literal newlines inside definition strings, but NEVER output a newline outside a quoted definition string.
-
-========================
-OUTPUT EMISSION CONTRACT
-========================
-Output ONLY item delta lines for Items that are created or changed vs CURRENT_MIN_DOC.
-No extra text.
-
-Delta line format (single physical line per item, parseable after host preprocessing):
-<LABEL>:"status":"<empty|partial|complete|waived>","definition":"<...>"
-
-Allowed status values only: empty|partial|complete|waived.
-
-========================
-LABEL RULES (BSS-SHAPED)
-========================
-Fixed labels (must exist; create if missing):
-- A1_PROJECT_CANVAS
-- A2_TECHNOLOGICAL_INTEGRATIONS
-- A3_TECHNICAL_CONSTRAINTS
-- A4_ACCEPTANCE_CRITERIA
-
-Dynamic label shape:
-- (UC|PROC|COMP|ROLE|UI|ENT|INT|API|NFR)-<digits>_<NAME>
-- <NAME> must match [A-Za-z0-9_]+ (no spaces).
-
-Deterministic naming when SOURCE_TEXT does not give a name:
-- UC-XX: use UC_XX (example: UC-07_UC_07).
-- API: derive from method + last path segment; if empty use Root (example: API-03_GET_Consumption or API-04_POST_Root).
-- ENT: use a safe transformed form of the table token (example: stripe_payment -> Stripe_Payment; user_ledger_entry -> User_Ledger_Entry).
-
-========================
-COVERAGE RULES (PRIMARY)
-========================
-C1) UC coverage
-- If SOURCE_TEXT contains literal UC numbers like UC-01, UC-02 (as text), you MUST create a corresponding UC item label UC-01_<NAME> etc.
-- If SOURCE_TEXT lists UC-XX but provides no details, still create the UC item with definition text like:
-  "Definition: PRD enumerates UC-XX but does not specify trigger/flow/outcome."
-
-C2) API endpoint coverage
-- If SOURCE_TEXT contains explicit HTTP endpoints of the form:
-  (GET|POST|PUT|PATCH|DELETE) + /path
-  you MUST create at least one API item PER UNIQUE (method,path).
-- Each such API item definition MUST contain that exact method and that exact path somewhere in the definition.
-
-C3) Core entity/table coverage
-- If SOURCE_TEXT explicitly names core tables/entities (e.g., user_ledger_entry, stripe_payment),
-  you MUST create an ENT item for EACH named token.
-- If SOURCE_TEXT provides field lists / schema / invariants, include them in the ENT definition.
-- If SOURCE_TEXT only names the table/entity but no contract, still create the ENT item with a minimal definition stating it is named by the PRD.
-
-========================
-DEFINITION RULES (MINIMAL)
-========================
-- definition is a quoted string.
-- Escape any literal double quote inside definition as \"
-- You may use any formatting inside the definition (including words like Definition:, Flow:, Contract:), but you are NOT required to use BSS segment separators.
-- Do NOT add References. Do NOT add open_items / ask_log / cancelled.
-
-========================
-FORBIDDEN-TOKEN HANDLING (to avoid false invariant trips)
-========================
-Some downstream verifiers use strict substring scanning. Therefore:
-
-- If SOURCE_TEXT says a forbidden feature MUST be used/implemented, you MUST preserve the original wording (even if it triggers later failure).
-- If SOURCE_TEXT says a forbidden feature MUST NOT be used, rephrase to avoid these exact substrings while preserving meaning:
-  "Customer Balance", "CustomerBalanceTransaction", "customer.balance",
-  "multi-currency", "multiple currencies", "store per-currency balance",
-  "store card number", "store PAN", "store CVC", "save CVC".
-  Example rephrase: use "single-currency only" instead of "no multi-currency".
-
-========================
-STATUS RUBRIC (MECHANICAL, NOT VIBES)
-========================
-- A1 complete only if SOURCE_TEXT states: what is being built + at least one outcome + explicit boundary (owns vs external). Else partial.
-- A2 complete only if SOURCE_TEXT names at least one must-use tech/integration. Else partial/empty.
-- A3 complete only if SOURCE_TEXT states at least one technical constraint/prohibition. Else partial/empty.
-- A4 complete only if SOURCE_TEXT states at least three acceptance outcomes/behaviors. Else partial.
-- UC complete only if SOURCE_TEXT provides at least a trigger and an outcome for that UC. Else partial.
-- API complete only if SOURCE_TEXT provides method+path and at least one behavior/contract detail. Else partial.
-- ENT complete only if SOURCE_TEXT provides any contract-ish detail (fields/schema/invariants/example payload). Else partial.
-
-========================
-INPUTS (PASTE AT END)
-========================
-
-CURRENT_MIN_DOC:
-<<<
-PASTE CURRENT MINIMAL LINES HERE (0+ lines). If empty, paste nothing.
->>>
-
-SOURCE_TEXT:
-<<<
-PASTE SOURCE_TEXT / PRD HERE
->>>
-"""
-
-
-BSS_CONTENT_ONLY_VERIFIER_PROMPT_V1 = r"""
-You are BSS_CONTENT_VERIFIER: a deterministic coverage + constraint verifier.
-
-Goal:
-- Decide whether CURRENT_MIN_DOC is acceptable as-is (LEAVE) or must be resubmitted (RESUBMIT).
-- Primary: coverage/completeness vs ORIGINAL_DOC.
-- Secondary: light sanity only (labels/status present). Do NOT enforce escaping/quote rules; host fixer owns that.
-
-INPUTS YOU MUST USE:
-- ORIGINAL_DOC (source-of-truth PRD)
-- CURRENT_MIN_DOC (host-canonicalized minimal lines)
-
-OUTPUT (STRICT)
-- If everything passes: output exactly: LEAVE
-- Else: output:
-  RESUBMIT
-  then up to 20 lines:
-  ERR <n>: <short reason>
-No other text.
-
-============================================================
-A) LIGHT STRUCTURE CHECKS (do not be picky)
-============================================================
-
-A0) Each non-empty line in CURRENT_MIN_DOC must contain:
-- a LABEL before the first colon
-- "status":"<value>"
-- "definition":"<value>"
-- status value must be exactly one of: empty|partial|complete|waived
-If any line fails A0 => RESUBMIT + ERR and stop.
-
-A1) LABEL validity
-- LABEL must be one of:
-  Fixed: A1_PROJECT_CANVAS, A2_TECHNOLOGICAL_INTEGRATIONS, A3_TECHNICAL_CONSTRAINTS, A4_ACCEPTANCE_CRITERIA
-  Or dynamic: (UC|PROC|COMP|ROLE|UI|ENT|INT|API|NFR)-<digits>_<NAME> where NAME matches [A-Za-z0-9_]+
-If any label fails A1 => RESUBMIT + ERR and stop.
-
-============================================================
-B) COVERAGE CHECKS (PRIMARY)
-============================================================
-
-B1) Required fixed anchors must exist as labels:
-- A1_PROJECT_CANVAS
-- A2_TECHNOLOGICAL_INTEGRATIONS
-- A3_TECHNICAL_CONSTRAINTS
-- A4_ACCEPTANCE_CRITERIA
-Missing any => ERR.
-
-B2) UC coverage (PRD-driven)
-- Extract expected UC numbers from ORIGINAL_DOC by regex: r"\bUC-(\d{2})\b"
-- Extract present UC numbers from CURRENT_MIN_DOC labels by regex: r"^UC-(\d{2})_"
-- Any expected UC number missing => ERR "Missing UC-XX item referenced by PRD".
-
-B3) API endpoint coverage (PRD-driven)
-- Extract expected endpoints from ORIGINAL_DOC by regex:
-  r"\b(GET|POST|PUT|PATCH|DELETE)\s+(/[\w\-/{}]+)"
-- For each expected (method,path), require at least one CURRENT_MIN_DOC line where:
-  - label starts with "API-"
-  - definition contains the same method token AND the same path substring
-Missing any => ERR "Missing API coverage for <METHOD> <PATH>".
-
-B4) Core entity/table coverage (PRD-driven)
-- If ORIGINAL_DOC contains any of these whole words:
-  user_ledger_entry, user_balance, stripe_customer, stripe_event, stripe_payment, subscription
-  then CURRENT_MIN_DOC must contain at least one ENT-* item that clearly corresponds to each present concept.
-Missing => ERR "Missing ENT for <name>".
-
-============================================================
-C) CONTENT SANITY (very light)
-============================================================
-
-C1) UC items: each UC-* definition must contain some trigger/outcome wording (minimal)
-- Must include "Trigger:" and "Outcome:" as substrings.
-If missing => ERR.
-
-C2) API items: each API-* definition must contain at least one HTTP method token and one path-like substring starting with "/".
-If missing => ERR.
-
-C3) ENT items: each ENT-* definition must start with "Entity" or contain "Entity" as substring.
-If missing => ERR.
-
-============================================================
-D) TRUE HARD CONSTRAINTS (avoid PRD false-positives)
-============================================================
-
-Important:
-- Do NOT fail simply because the document *mentions* a forbidden concept in a negative/prohibitive way.
-- Only fail when CURRENT_MIN_DOC asserts/permits the forbidden behavior.
-
-D1) Deposit must not pay subscriptions
-- If CURRENT_MIN_DOC contains an affirmative statement that deposit balance is used to pay subscriptions, => ERR.
-(Do not flag statements that say the opposite.)
-
-D2) No storing PAN/CVC
-- If CURRENT_MIN_DOC explicitly states storing PAN or CVC, => ERR.
-(Do not flag statements that say 'do not store'.)
-
-D3) Stripe Customer Balance API usage
-- If CURRENT_MIN_DOC asserts using Stripe customer balance mechanisms (e.g., customer.balance, CustomerBalanceTransaction), => ERR.
-(Do not flag statements that say 'do not use'.)
-
-============================================================
-DECISION
-============================================================
-
-- If any ERR exists: output RESUBMIT + ERR lines (max 20).
-- Else: output LEAVE
-
-INPUTS (paste at end)
-
-ORIGINAL_DOC:
-<<<
-PASTE ORIGINAL PRD HERE
->>>
-
-CURRENT_MIN_DOC:
-<<<
-PASTE CURRENT MINIMAL LINES HERE
->>>
-"""
-
-
-
-BSS_MIN_MECH_FIXER_PROMPT_V2_PATCH = r"""
-You are BSS_MIN_MECH_FIXER_PATCH: a deterministic, mechanical patch generator.
-
-Goal:
-- Read RAW_MODEL_OUTPUT (the ingestor output).
-- Find Broken lines according to a set of rules you will be givwn and fix those lines.
-- Emit ONLY fixed lines.
-- DO NOT re-emit lines that are already mechanically valid.
-- DO NOT add, remove, or change meaning/content; return ONLY mechanical repairs.
-
-============================================================
-WHAT COUNTS AS "MECHANICALLY VALID" (so you must NOT emit it)
-============================================================
-
-A line/item is mechanically valid if ALL are true:
-2) It matches the format:
-   <LABEL>:"status":"<empty|partial|complete|waived>","definition":"<...>"
-3) The definition string contains:
-   - no literal newline characters (they must be written as \n)
-   - no literal tab characters (they must be written as \t)
-   - no raw double quotes inside the definition content OUTSIDE  OF WHAT THE RULES ALLOW
-
-If an item is mechanically valid, emit NOTHING for it.
-
-============================================================
-MECHANICAL REPAIR RULES
-============================================================
-
-R1) Item detection
-- An item begins with a LABEL at the start of a line matching either:
-  Fixed: A1_PROJECT_CANVAS, A2_TECHNOLOGICAL_INTEGRATIONS, A3_TECHNICAL_CONSTRAINTS, A4_ACCEPTANCE_CRITERIA
-  Or dynamic: (UC|PROC|COMP|ROLE|UI|ENT|INT|API|NFR)-<digits>_<NAME> where NAME matches [A-Za-z0-9_]+
-- If RAW_MODEL_OUTPUT contains multi-line items, treat the item as continuing until the next line that begins with a valid LABEL, or end of input.
-- Once the item is detected it must contain
-  - status: from a substring like "status":"<empty|partial|complete|waived>"
-  - definition: from a substring like "definition":"..."
-
-- MECHANICAL ERRORS ON DETECTION happens when between a Label or another
-  - extra keys exist in the form "<key name":"value"
-  - status is missing or not one of {empty, partial, complete, waived}
-  - definition is missing.
-
- (set status="partial" if definition is non-empty else status="empty")
-
-R2) Rules for the
-
-R4) Normalize newlines/tabs inside definition
-- Replace literal newline characters inside definition content with \n
-- Replace literal tab characters inside definition content with \t
-- Output must be a single physical line.
-
-R5) Escape double quotes inside definition (main fix)
-- Inside the definition content, convert any raw " characters into \"
-- Preserve existing escaped quotes: \" stays \"
-- Do NOT alter the outer delimiter quotes that wrap the definition field itself.
-
-R6) Preserve text
-- Do not paraphrase, summarize, reorder, or “improve”.
-- Only apply the mechanical transformations above.
-
-R7) Emit only if a fix was needed
-- After you build the canonical fixed line, compare against the original item:
-  If the original item was already mechanically valid (per the validity rules), emit nothing.
-  Otherwise emit the canonical fixed line.
-
-R8) If you cannot confidently extract a LABEL, emit nothing for that fragment.
-
-============================================================
-INPUT (paste at end)
-============================================================
-
-RAW_MODEL_OUTPUT:
-<<<
-PASTE RAW MODEL OUTPUT HERE
->>>
-"""
-
-
-
-
-
-
-
-
-BSS_LINKER_PROMPT_V1 = r"""
-You are BSS_LINKER: a graph-linking and normalization agent.
-
-Goal:
-- Input is CURRENT_MIN_DOC (LABEL,status,definition only).
-- Output full BSS item lines by:
-  1) preserving LABEL, status, and definition text (do not rewrite content),
-  2) appending a References segment to definition if missing,
-  3) filling References lists with item labels based on explicit mentions implied by label families and obvious direct dependencies,
-  4) adding host-default fields: open_items="[]", ask_log="[]", cancelled=false.
-
-Output format (STRICT):
-<LABEL>:"status":"...","definition":"<definition ending with References: ...>","open_items":"[]","ask_log":"[]","cancelled":false
-
-Linking rules:
-- Only add direct, intentional References.
-- Do not invent new items; reference only labels that exist in CURRENT_MIN_DOC.
-- If you cannot confidently link something, leave it unreferenced.
-
-References shape:
-References: UseCases=[...] Processes=[...] Components=[...] Actors=[...] Entities=[...] Integrations=[...] APIs=[...] UI=[...] NFRs=[...]
-
-INPUTS
-
-CURRENT_MIN_DOC:
-<<<
-PASTE CURRENT MINIMAL LINES HERE
->>>
-"""
+# 6) open_items (1–3 max, missing facts only, no labels)
+# - If any connected UC text was missing:
+#   include: OI-1 high: Missing: source use case text for one or more connected use cases
+# - If responsibilities were unspecified:
+#   add a family-appropriate missing-fact:
+#     ROLE: Missing: role responsibilities and intent
+#     COMP: Missing: component responsibilities (what it provides/does)
+#     INT:  Missing: what this external system is used for
+#     API:  Missing: operation purpose and success/failure guarantees
+#     UI:   Missing: surface purpose and user-visible feedback
+#     ENT:  Missing: what this record represents
+#     NFR:  Missing: constraint statement
+# - Use bracketed list format: [OI-1 high: ...; OI-2 med: ...]
+# - If nothing is missing, open_items="[]".
+
+# 7) ask_log
+# - Always: [Ingested: synthesized responsibilities from connected use cases (count=<N>)]
+#   where <N> is the number of UC labels listed for this CONNECTED_ID in CONNECTED_INDEX.
+# - Do NOT include any labels or UC names.
+
+# 8) cancelled
+# - Always emit cancelled:false.
+
+# INPUTS
+# BSS_SHARED_SCHEMA:
+# <<<
+# {BSS_SHARED_SCHEMA}
+# >>>
+
+# RAW_UC_LIST:
+# <<<
+# PASTE UC BLOCKS HERE
+# >>>
+
+# CONNECTED_INDEX:
+# <<<
+# PASTE CONNECTED_ID:UC_LABEL,... LINES HERE
+# >>>
+# """
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# BSS_MIN_INGESTOR_PROMPT_V2 = r"""
+# You are BSS_MIN_INGESTOR: a compiler-only ingestion agent.
+
+# Goal:
+# - Translate SOURCE_TEXT into a minimal requirements ledger.
+# - Output only: LABEL + status + definition (no References, open_items, ask_log, cancelled).
+# - Cold-data only: write ONLY facts/constraints/choices explicitly stated in SOURCE_TEXT. No invention, no “improvement”.
+
+# HOST PREPROCESSOR CONTRACT (AUTHORITATIVE)
+# - The host will replace any literal newline characters that appear INSIDE quoted strings with the two-character sequence \n BEFORE splitting lines.
+# - Therefore: you may include literal newlines inside definition strings, but NEVER output a newline outside a quoted definition string.
+
+# ========================
+# OUTPUT EMISSION CONTRACT
+# ========================
+# Output ONLY item delta lines for Items that are created or changed vs CURRENT_MIN_DOC.
+# No extra text.
+
+# Delta line format (single physical line per item, parseable after host preprocessing):
+# <LABEL>:"status":"<empty|partial|complete|waived>","definition":"<...>"
+
+# Allowed status values only: empty|partial|complete|waived.
+
+# ========================
+# LABEL RULES (BSS-SHAPED)
+# ========================
+# Fixed labels (must exist; create if missing):
+# - A1_PROJECT_CANVAS
+# - A2_TECHNOLOGICAL_INTEGRATIONS
+# - A3_TECHNICAL_CONSTRAINTS
+# - A4_ACCEPTANCE_CRITERIA
+
+# Dynamic label shape:
+# - (UC|PROC|COMP|ROLE|UI|ENT|INT|API|NFR)-<digits>_<NAME>
+# - <NAME> must match [A-Za-z0-9_]+ (no spaces).
+
+# Deterministic naming when SOURCE_TEXT does not give a name:
+# - UC-XX: use UC_XX (example: UC-07_UC_07).
+# - API: derive from method + last path segment; if empty use Root (example: API-03_GET_Consumption or API-04_POST_Root).
+# - ENT: use a safe transformed form of the table token (example: stripe_payment -> Stripe_Payment; user_ledger_entry -> User_Ledger_Entry).
+
+# ========================
+# COVERAGE RULES (PRIMARY)
+# ========================
+# C1) UC coverage
+# - If SOURCE_TEXT contains literal UC numbers like UC-01, UC-02 (as text), you MUST create a corresponding UC item label UC-01_<NAME> etc.
+# - If SOURCE_TEXT lists UC-XX but provides no details, still create the UC item with definition text like:
+#   "Definition: PRD enumerates UC-XX but does not specify trigger/flow/outcome."
+
+# C2) API endpoint coverage
+# - If SOURCE_TEXT contains explicit HTTP endpoints of the form:
+#   (GET|POST|PUT|PATCH|DELETE) + /path
+#   you MUST create at least one API item PER UNIQUE (method,path).
+# - Each such API item definition MUST contain that exact method and that exact path somewhere in the definition.
+
+# C3) Core entity/table coverage
+# - If SOURCE_TEXT explicitly names core tables/entities (e.g., user_ledger_entry, stripe_payment),
+#   you MUST create an ENT item for EACH named token.
+# - If SOURCE_TEXT provides field lists / schema / invariants, include them in the ENT definition.
+# - If SOURCE_TEXT only names the table/entity but no contract, still create the ENT item with a minimal definition stating it is named by the PRD.
+
+# ========================
+# DEFINITION RULES (MINIMAL)
+# ========================
+# - definition is a quoted string.
+# - Escape any literal double quote inside definition as \"
+# - You may use any formatting inside the definition (including words like Definition:, Flow:, Contract:), but you are NOT required to use BSS segment separators.
+# - Do NOT add References. Do NOT add open_items / ask_log / cancelled.
+
+# ========================
+# FORBIDDEN-TOKEN HANDLING (to avoid false invariant trips)
+# ========================
+# Some downstream verifiers use strict substring scanning. Therefore:
+
+# - If SOURCE_TEXT says a forbidden feature MUST be used/implemented, you MUST preserve the original wording (even if it triggers later failure).
+# - If SOURCE_TEXT says a forbidden feature MUST NOT be used, rephrase to avoid these exact substrings while preserving meaning:
+#   "Customer Balance", "CustomerBalanceTransaction", "customer.balance",
+#   "multi-currency", "multiple currencies", "store per-currency balance",
+#   "store card number", "store PAN", "store CVC", "save CVC".
+#   Example rephrase: use "single-currency only" instead of "no multi-currency".
+
+# ========================
+# STATUS RUBRIC (MECHANICAL, NOT VIBES)
+# ========================
+# - A1 complete only if SOURCE_TEXT states: what is being built + at least one outcome + explicit boundary (owns vs external). Else partial.
+# - A2 complete only if SOURCE_TEXT names at least one must-use tech/integration. Else partial/empty.
+# - A3 complete only if SOURCE_TEXT states at least one technical constraint/prohibition. Else partial/empty.
+# - A4 complete only if SOURCE_TEXT states at least three acceptance outcomes/behaviors. Else partial.
+# - UC complete only if SOURCE_TEXT provides at least a trigger and an outcome for that UC. Else partial.
+# - API complete only if SOURCE_TEXT provides method+path and at least one behavior/contract detail. Else partial.
+# - ENT complete only if SOURCE_TEXT provides any contract-ish detail (fields/schema/invariants/example payload). Else partial.
+
+# ========================
+# INPUTS (PASTE AT END)
+# ========================
+
+# CURRENT_MIN_DOC:
+# <<<
+# PASTE CURRENT MINIMAL LINES HERE (0+ lines). If empty, paste nothing.
+# >>>
+
+# SOURCE_TEXT:
+# <<<
+# PASTE SOURCE_TEXT / PRD HERE
+# >>>
+# """
+
+
+# BSS_CONTENT_ONLY_VERIFIER_PROMPT_V1 = r"""
+# You are BSS_CONTENT_VERIFIER: a deterministic coverage + constraint verifier.
+
+# Goal:
+# - Decide whether CURRENT_MIN_DOC is acceptable as-is (LEAVE) or must be resubmitted (RESUBMIT).
+# - Primary: coverage/completeness vs ORIGINAL_DOC.
+# - Secondary: light sanity only (labels/status present). Do NOT enforce escaping/quote rules; host fixer owns that.
+
+# INPUTS YOU MUST USE:
+# - ORIGINAL_DOC (source-of-truth PRD)
+# - CURRENT_MIN_DOC (host-canonicalized minimal lines)
+
+# OUTPUT (STRICT)
+# - If everything passes: output exactly: LEAVE
+# - Else: output:
+#   RESUBMIT
+#   then up to 20 lines:
+#   ERR <n>: <short reason>
+# No other text.
+
+# ============================================================
+# A) LIGHT STRUCTURE CHECKS (do not be picky)
+# ============================================================
+
+# A0) Each non-empty line in CURRENT_MIN_DOC must contain:
+# - a LABEL before the first colon
+# - "status":"<value>"
+# - "definition":"<value>"
+# - status value must be exactly one of: empty|partial|complete|waived
+# If any line fails A0 => RESUBMIT + ERR and stop.
+
+# A1) LABEL validity
+# - LABEL must be one of:
+#   Fixed: A1_PROJECT_CANVAS, A2_TECHNOLOGICAL_INTEGRATIONS, A3_TECHNICAL_CONSTRAINTS, A4_ACCEPTANCE_CRITERIA
+#   Or dynamic: (UC|PROC|COMP|ROLE|UI|ENT|INT|API|NFR)-<digits>_<NAME> where NAME matches [A-Za-z0-9_]+
+# If any label fails A1 => RESUBMIT + ERR and stop.
+
+# ============================================================
+# B) COVERAGE CHECKS (PRIMARY)
+# ============================================================
+
+# B1) Required fixed anchors must exist as labels:
+# - A1_PROJECT_CANVAS
+# - A2_TECHNOLOGICAL_INTEGRATIONS
+# - A3_TECHNICAL_CONSTRAINTS
+# - A4_ACCEPTANCE_CRITERIA
+# Missing any => ERR.
+
+# B2) UC coverage (PRD-driven)
+# - Extract expected UC numbers from ORIGINAL_DOC by regex: r"\bUC-(\d{2})\b"
+# - Extract present UC numbers from CURRENT_MIN_DOC labels by regex: r"^UC-(\d{2})_"
+# - Any expected UC number missing => ERR "Missing UC-XX item referenced by PRD".
+
+# B3) API endpoint coverage (PRD-driven)
+# - Extract expected endpoints from ORIGINAL_DOC by regex:
+#   r"\b(GET|POST|PUT|PATCH|DELETE)\s+(/[\w\-/{}]+)"
+# - For each expected (method,path), require at least one CURRENT_MIN_DOC line where:
+#   - label starts with "API-"
+#   - definition contains the same method token AND the same path substring
+# Missing any => ERR "Missing API coverage for <METHOD> <PATH>".
+
+# B4) Core entity/table coverage (PRD-driven)
+# - If ORIGINAL_DOC contains any of these whole words:
+#   user_ledger_entry, user_balance, stripe_customer, stripe_event, stripe_payment, subscription
+#   then CURRENT_MIN_DOC must contain at least one ENT-* item that clearly corresponds to each present concept.
+# Missing => ERR "Missing ENT for <name>".
+
+# ============================================================
+# C) CONTENT SANITY (very light)
+# ============================================================
+
+# C1) UC items: each UC-* definition must contain some trigger/outcome wording (minimal)
+# - Must include "Trigger:" and "Outcome:" as substrings.
+# If missing => ERR.
+
+# C2) API items: each API-* definition must contain at least one HTTP method token and one path-like substring starting with "/".
+# If missing => ERR.
+
+# C3) ENT items: each ENT-* definition must start with "Entity" or contain "Entity" as substring.
+# If missing => ERR.
+
+# ============================================================
+# D) TRUE HARD CONSTRAINTS (avoid PRD false-positives)
+# ============================================================
+
+# Important:
+# - Do NOT fail simply because the document *mentions* a forbidden concept in a negative/prohibitive way.
+# - Only fail when CURRENT_MIN_DOC asserts/permits the forbidden behavior.
+
+# D1) Deposit must not pay subscriptions
+# - If CURRENT_MIN_DOC contains an affirmative statement that deposit balance is used to pay subscriptions, => ERR.
+# (Do not flag statements that say the opposite.)
+
+# D2) No storing PAN/CVC
+# - If CURRENT_MIN_DOC explicitly states storing PAN or CVC, => ERR.
+# (Do not flag statements that say 'do not store'.)
+
+# D3) Stripe Customer Balance API usage
+# - If CURRENT_MIN_DOC asserts using Stripe customer balance mechanisms (e.g., customer.balance, CustomerBalanceTransaction), => ERR.
+# (Do not flag statements that say 'do not use'.)
+
+# ============================================================
+# DECISION
+# ============================================================
+
+# - If any ERR exists: output RESUBMIT + ERR lines (max 20).
+# - Else: output LEAVE
+
+# INPUTS (paste at end)
+
+# ORIGINAL_DOC:
+# <<<
+# PASTE ORIGINAL PRD HERE
+# >>>
+
+# CURRENT_MIN_DOC:
+# <<<
+# PASTE CURRENT MINIMAL LINES HERE
+# >>>
+# """
+
+
+
+# BSS_MIN_MECH_FIXER_PROMPT_V2_PATCH = r"""
+# You are BSS_MIN_MECH_FIXER_PATCH: a deterministic, mechanical patch generator.
+
+# Goal:
+# - Read RAW_MODEL_OUTPUT (the ingestor output).
+# - Find Broken lines according to a set of rules you will be givwn and fix those lines.
+# - Emit ONLY fixed lines.
+# - DO NOT re-emit lines that are already mechanically valid.
+# - DO NOT add, remove, or change meaning/content; return ONLY mechanical repairs.
+
+# ============================================================
+# WHAT COUNTS AS "MECHANICALLY VALID" (so you must NOT emit it)
+# ============================================================
+
+# A line/item is mechanically valid if ALL are true:
+# 2) It matches the format:
+#    <LABEL>:"status":"<empty|partial|complete|waived>","definition":"<...>"
+# 3) The definition string contains:
+#    - no literal newline characters (they must be written as \n)
+#    - no literal tab characters (they must be written as \t)
+#    - no raw double quotes inside the definition content OUTSIDE  OF WHAT THE RULES ALLOW
+
+# If an item is mechanically valid, emit NOTHING for it.
+
+# ============================================================
+# MECHANICAL REPAIR RULES
+# ============================================================
+
+# R1) Item detection
+# - An item begins with a LABEL at the start of a line matching either:
+#   Fixed: A1_PROJECT_CANVAS, A2_TECHNOLOGICAL_INTEGRATIONS, A3_TECHNICAL_CONSTRAINTS, A4_ACCEPTANCE_CRITERIA
+#   Or dynamic: (UC|PROC|COMP|ROLE|UI|ENT|INT|API|NFR)-<digits>_<NAME> where NAME matches [A-Za-z0-9_]+
+# - If RAW_MODEL_OUTPUT contains multi-line items, treat the item as continuing until the next line that begins with a valid LABEL, or end of input.
+# - Once the item is detected it must contain
+#   - status: from a substring like "status":"<empty|partial|complete|waived>"
+#   - definition: from a substring like "definition":"..."
+
+# - MECHANICAL ERRORS ON DETECTION happens when between a Label or another
+#   - extra keys exist in the form "<key name":"value"
+#   - status is missing or not one of {empty, partial, complete, waived}
+#   - definition is missing.
+
+#  (set status="partial" if definition is non-empty else status="empty")
+
+# R2) Rules for the
+
+# R4) Normalize newlines/tabs inside definition
+# - Replace literal newline characters inside definition content with \n
+# - Replace literal tab characters inside definition content with \t
+# - Output must be a single physical line.
+
+# R5) Escape double quotes inside definition (main fix)
+# - Inside the definition content, convert any raw " characters into \"
+# - Preserve existing escaped quotes: \" stays \"
+# - Do NOT alter the outer delimiter quotes that wrap the definition field itself.
+
+# R6) Preserve text
+# - Do not paraphrase, summarize, reorder, or “improve”.
+# - Only apply the mechanical transformations above.
+
+# R7) Emit only if a fix was needed
+# - After you build the canonical fixed line, compare against the original item:
+#   If the original item was already mechanically valid (per the validity rules), emit nothing.
+#   Otherwise emit the canonical fixed line.
+
+# R8) If you cannot confidently extract a LABEL, emit nothing for that fragment.
+
+# ============================================================
+# INPUT (paste at end)
+# ============================================================
+
+# RAW_MODEL_OUTPUT:
+# <<<
+# PASTE RAW MODEL OUTPUT HERE
+# >>>
+# """
+
+
+
+
+
+
+
+
+# BSS_LINKER_PROMPT_V1 = r"""
+# You are BSS_LINKER: a graph-linking and normalization agent.
+
+# Goal:
+# - Input is CURRENT_MIN_DOC (LABEL,status,definition only).
+# - Output full BSS item lines by:
+#   1) preserving LABEL, status, and definition text (do not rewrite content),
+#   2) appending a References segment to definition if missing,
+#   3) filling References lists with item labels based on explicit mentions implied by label families and obvious direct dependencies,
+#   4) adding host-default fields: open_items="[]", ask_log="[]", cancelled=false.
+
+# Output format (STRICT):
+# <LABEL>:"status":"...","definition":"<definition ending with References: ...>","open_items":"[]","ask_log":"[]","cancelled":false
+
+# Linking rules:
+# - Only add direct, intentional References.
+# - Do not invent new items; reference only labels that exist in CURRENT_MIN_DOC.
+# - If you cannot confidently link something, leave it unreferenced.
+
+# References shape:
+# References: UseCases=[...] Processes=[...] Components=[...] Actors=[...] Entities=[...] Integrations=[...] APIs=[...] UI=[...] NFRs=[...]
+
+# INPUTS
+
+# CURRENT_MIN_DOC:
+# <<<
+# PASTE CURRENT MINIMAL LINES HERE
+# >>>
+# """
 

@@ -61,7 +61,7 @@ from classes.GCConnection_hlpr import GCConnection
 
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.BASIC_FORMAT,
     format="%(asctime)s | %(levelname)s | %(name)s\n%(message)s\n",
 )
 logger = logging.getLogger("kahuna_worker")

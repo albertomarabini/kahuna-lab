@@ -34,11 +34,10 @@ logger = logging.getLogger("kahuna_backend")
 _job_ctx_var = contextvars.ContextVar("job_ctx", default=None)
 
 
-
 class Backend(Utils):
     def __init__(self):
         self.SessionFactory = GCConnection().build_db_session_factory()
-
+        self.llm_timeout=300
         # Initialize default LLMs (used as fallback only)
         try:
             default_model = "gemini-2.5-flash-lite"
@@ -86,10 +85,15 @@ class Backend(Utils):
 
             if request_type == "load_project":
                 response_data["data"] = {}
+
+                # preliminary schema
                 response_data["data"]["updated_schema"] = self.load_project(project_id)
-                response_data["data"]["bss_schema"] = self._redact_bss_schema_for_ui(
-                    self.load_bss_schema(project_id)
-                )
+                # full BSS with metadata
+                raw_bss = self.load_bss_schema(project_id)
+                # send metadata only on load_project
+                response_data["data"]["metadata"] = raw_bss.get("metadata", None)
+                # document for the editor: redacted, no metadata
+                response_data["data"]["bss_schema"] = self._redact_bss_schema_for_ui(raw_bss)
                 response_data["data"]["bss_labels"] = self._bss_labels
 
             elif request_type == "save_project":
@@ -113,7 +117,8 @@ class Backend(Utils):
 
             elif request_type == "ingestion":
                 response_data["data"] = self.handle_ingestion(project_id, payload)
-
+            elif request_type == "save_state":
+                response_data["data"] = self.handle_save_state(project_id, payload)
             else:
                 response_data["status"] = "error"
                 response_data["message"] = f"Unknown request type: {request_type}"
@@ -139,15 +144,19 @@ class Backend(Utils):
     def handle_bss_chat(self, project_id: str, payload):
         payload = payload or {}
         user_text = (payload.get("text") or "").strip()
+        chat_queue = None
 
         llm, chat_llm = self._build_llms_for_payload(payload)
-
         current_bss = self.load_bss_schema(project_id)
 
         # PRE: build prompt inputs
         current_document = self._bss_current_document_for_prompt(current_bss)
         registry_ledger = self._build_registry_ledger(current_bss)
         registry_ledger_json = json.dumps(registry_ledger, indent=2)
+        open_items = self._collect_open_items_by_gravity(current_bss)
+        open_items_block = "\n".join(f"{a}: {b}" for (a, b) in open_items)
+        next_indices = self._bss_next_indices(current_bss)
+        next_indices_str = ", ".join(f"{fam}:{idx}" for fam, idx in sorted(next_indices.items()))
 
         example_kwargs = self._bss_example_kwargs(current_bss)
 
@@ -156,13 +165,19 @@ class Backend(Utils):
             USER_QUESTION=user_text,
             CURRENT_DOCUMENT=current_document,
             REGISTRY_LEDGER=registry_ledger_json,
+            OPEN_ITEMS_BY_GRAVITY=open_items_block,
+            NEXT_LABEL_INDICES=next_indices_str,
             **example_kwargs,
         )
 
-        print("===============Prompt\n\n" + prompt)
-
         if chat_llm:
             messages_for_llm = GLOBAL_BSS_HISTORY_CACHE.snapshot(project_id)
+            if not messages_for_llm and isinstance(current_bss, dict):
+                metadata = current_bss.get("metadata")
+                if isinstance(metadata, dict):
+                    stored_queue = metadata.get("chat_queue")
+                    if isinstance(stored_queue, list):
+                        messages_for_llm = self._chat_queue_to_messages(stored_queue)
             messages_for_llm.append(HumanMessage(content=prompt))
             raw = chat_llm.invoke(messages_for_llm)
             raw = getattr(raw, "content", str(raw))
@@ -257,11 +272,31 @@ class Backend(Utils):
             )
         # else: no relationship recompute (non-draft items' relationships stay frozen)
 
+        # Store chat history + heartbeat together in the global history cache
+        # (see note below on HistoryCache)
+        GLOBAL_BSS_HISTORY_CACHE.append_turn(
+            project_id,
+            user_text,
+            next_question,
+        )
+
+        # Persist current chat queue into metadata.chat_queue
+        # build chat_queue from history only (no prompt)
+        hist_msgs = GLOBAL_BSS_HISTORY_CACHE.snapshot(project_id)
+        chat_queue = self._messages_to_chat_queue(hist_msgs, limit=10)
+        metadata = updated_bss.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        metadata["chat_queue"] = chat_queue
+        updated_bss["metadata"] = metadata
+
         self.save_bss_schema(project_id, updated_bss)
 
+        # ###############################################################
         # 1) Early callback: send updated doc + bot reply immediately
         #    (intermediate event; final HTTP response will only contain
         #    relationship diffs + heartbeat).
+        # ###############################################################
         self.emit(
             "chat_early_callback",
             {
@@ -271,42 +306,68 @@ class Backend(Utils):
             },
         )
 
-        # 2) Refine COMP <-> API relationship directions using a second LLM call.
-        updated_bss, updated_relationships = self._refine_proc_api_relationships(
+        # 2) Second-pass relationship refinement (PROC↔API, PROC↔PROC, UI↔UI, ENT↔ENT).
+        updated_bss, updated_relationships, refine_extra_cost = self._refine_all_second_pass_relationships(
             updated_bss,
             draft_roots=draft_roots,
-            llm_client=chat_llm,
+            model_name=self._detect_llm_model_in_payload(payload) or "gemini-2.5-flash-lite",
+            project_id=str(project_id),
+            user_text=user_text,
+            bot_message=next_question,
+            turn_labels=draft_roots,
         )
 
-        # Persist any relationship changes derived from the COMP/API tie-break step.
+        # Persist any relationship changes derived from the tie-break step.
         if updated_relationships:
             self.save_bss_schema(project_id, updated_bss)
 
         # 3) Compute amount/currency from the LLM client (both calls).
-
+        main_cost = chat_llm.get_accrued_cost() if chat_llm else 0
+        total_cost = float(main_cost) + float(refine_extra_cost or 0.0)
         idempotency_key = record_pending_charge(
             self.SessionFactory,
             project_id=str(project_id),
-            amount=chat_llm.get_accrued_cost(),
+            amount=total_cost,
             currency=CURRENCY
         )
 
         # Store idempotency_key
         IDEMPOTENCY_CACHE.add(idempotency_key)
 
-        # Store chat history + heartbeat together in the global history cache
-        # (see note below on HistoryCache)
-        GLOBAL_BSS_HISTORY_CACHE.append_turn(
-            project_id,
-            user_text,
-            next_question,
-        )
-
         return {
             "updated_relationships": updated_relationships,
             "heartbeat": idempotency_key,
         }
 
+    def handle_save_state(self, project_id: str, payload: dict) -> dict:
+        """
+        Save arbitrary UI state into bss_schema.metadata.ui_state.
+
+        Payload:
+          {
+            "state": <any JSON-serializable blob>
+          }
+        """
+        payload = payload or {}
+        if "state" not in payload:
+            raise ValueError("save_state payload.state is required")
+
+        state_blob = payload["state"]
+
+        current_bss = self.load_bss_schema(project_id)
+        if not isinstance(current_bss, dict):
+            current_bss = {}
+
+        metadata = current_bss.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        metadata["ui_state"] = state_blob
+        current_bss["metadata"] = metadata
+
+        self.save_bss_schema(project_id, current_bss)
+
+        return {"ok": True}
 
 
     def handle_edit_bss_document(self, project_id: str, payload):
@@ -625,9 +686,16 @@ class Backend(Utils):
             "to": _extract_node(dst),
         }
 
-
-
     def _apply_bss_slot_updates(self, current_bss: dict, slot_updates: dict) -> dict:
+        """
+        Apply LLM-emitted slot updates to the current BSS graph.
+
+        Rules:
+        - This function defaults brand-new items to 'draft' once.
+        - Segments that are not part of the allowed set for the label family
+        are dropped and logged; they are never persisted.
+        - cancelled=True means: delete the node from the graph.
+        """
         if not isinstance(current_bss, dict):
             current_bss = {}
 
@@ -658,13 +726,10 @@ class Backend(Utils):
             existing = self._normalize_bss_item(existing_raw)
 
             # Status:
-            # - brand new items are always created as 'draft'
-            # - for existing items we honor an explicit status from the patch
-            status = patch.get("status")
-            if is_new:
+            # - UI-owned. LLM patches cannot change status.
+            # - For brand new items, default to 'draft' only if still empty.
+            if is_new and not (existing.get("status") or "").strip():
                 existing["status"] = "draft"
-            elif isinstance(status, str) and status.strip():
-                existing["status"] = status.strip()
 
             # Split existing definition into segments
             existing_def = existing.get("definition") or ""
@@ -674,15 +739,34 @@ class Backend(Utils):
             new_segments = patch.get("segments") or {}
             if isinstance(new_segments, dict):
                 for seg_name, seg_body in new_segments.items():
-                    key = seg_name.lower()
+                    key = (seg_name or "").strip().lower()
+                    if not key:
+                        continue
                     if not isinstance(seg_body, str):
                         continue
                     segments_current[key] = seg_body
 
-            # Log missing required segments for this label type
-            self._log_missing_required_segments(label, segments_current)
+            # Filter out segments that are not allowed for this family
+            label_type = self._bss_label_type(label) or ""
+            allowed_segments = self._bss_allowed_segments_for_type(label_type)
+            # Only definition-segments live inside "definition"; open_items / ask_log are fields.
+            allowed_def_segments = {s for s in allowed_segments if s not in {"open_items", "ask_log"}}
 
-            # Rebuild definition from segments_current
+            filtered_segments: dict[str, str] = {}
+            for key, val in segments_current.items():
+                if key in allowed_def_segments:
+                    filtered_segments[key] = val
+                else:
+                    if (val or "").strip():
+                        # Log and drop unknown segment
+                        self.color_print(
+                            f"[BSS] Dropping unknown segment '{key}' for label {label} (type {label_type})",
+                            color="yellow",
+                        )
+
+            segments_current = filtered_segments
+
+            # Rebuild definition from filtered segments
             preferred_order = [
                 "definition",
                 "flow",
@@ -706,7 +790,7 @@ class Backend(Utils):
                 header = key.capitalize()
                 pieces.append(f"{header}: {val}")
 
-            # Any extra segment names not in preferred_order
+            # Any extra allowed segment names not in preferred_order
             for key in sorted(segments_current.keys()):
                 if key in used:
                     continue
@@ -722,8 +806,7 @@ class Backend(Utils):
 
             # open_items: full replacement if provided
             if "open_items" in patch:
-                oi = patch.get("open_items") or ""
-                existing["open_items"] = oi
+                existing["open_items"] = patch.get("open_items") or ""
 
             # ask_log: append with '; ' separator if provided
             ask_append = (patch.get("ask_log_append") or "").strip()
@@ -740,6 +823,7 @@ class Backend(Utils):
             current_bss[section][label] = existing
 
         return current_bss
+
 
 
 
@@ -1104,29 +1188,33 @@ class Backend(Utils):
                 if not family_items:
                     break
 
-        # Optional PROC<->API relationship refinement using the same LLM client.
-        # In ingestion everything is effectively "new", so we allow refinement
-        # across all PROC/API items (subject to the internal guards).
+        # Relationship refinement using the same LLM client.
+        # across all relevant items (PROC/API/UI/ENT).
         self.emit("ingestion_status", {"note": f"Refining"})
-        proc_api_roots: set[str] = {
+        all_roots: set[str] = {
             lbl
             for lbl, _ in self._iter_bss_items(current_bss)
-            if self._bss_label_type(lbl) in ("PROC", "API")
+            if self._bss_label_type(lbl) in ("PROC", "API", "UI", "ENT")
         }
-        if proc_api_roots:
-            current_bss, _ = self._refine_proc_api_relationships(
+        refine_extra_cost = 0.0
+        if all_roots:
+            model_name = self._detect_llm_model_in_payload(payload) or "gemini-2.5-flash-lite"
+            current_bss, _, refine_extra_cost = self._refine_all_second_pass_relationships(
                 current_bss,
-                draft_roots=proc_api_roots,
-                llm_client=llm,
+                draft_roots=all_roots,
+                model_name=model_name,
             )
 
         # finally persist
         self.save_bss_schema(project_id, current_bss)
 
+
+        main_cost = llm.get_accrued_cost() if llm else 0
+        total_cost = float(main_cost) + float(refine_extra_cost or 0.0)
         idempotency_key = record_pending_charge(
             self.SessionFactory,
             project_id=str(project_id),
-            amount=llm.get_accrued_cost(),
+            amount=total_cost,
             currency=CURRENCY,
         )
 

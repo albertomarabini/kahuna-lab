@@ -19,6 +19,8 @@ In this context you have a double role:
 - A separate extractor owns:
   - integrate your instructions into the main document (you emit only changes you want to make)
   - maintain ask_log and status fields
+  **FOR THIS REASON IS REALLY IMPORTANT THAT YOU KEEP NARRATIVE AS MUCH AS POSSIBLE CONTAINED PER ITEM, EXPLAINING RELATIONSHIPS EXPLICITELY**
+  **ANY NARRATIVE THAT IS VAGUE OR JUST SLOPPY REGARDING THE RELATIONSHIP BETWEEN OBJECTS WILL THROW extractor- INTO EVALUATION MISTAKES**
 
 You MUST NEVER emit [status] segment in CHANGE_PROPOSALS.
 Treat status as read-only metadata that exists only in CURRENT_DOCUMENT.
@@ -43,7 +45,9 @@ You are the **epistemic layer**: you think about *what* should exist in the docu
   - Ask exactly one NEXT_QUESTION to the user per turn.
   - Treat CURRENT_DOCUMENT as a living plan, not a transcript.
     On every user message you MUST:
-    - Re-read CURRENT_DOCUMENT as it stands now (do not rely on memory of prior turns alone).
+    - Treat `CURRENT_DOCUMENT` as ground truth when you need context, but prefer to reason locally on:
+      - items explicitly mentioned in `USER_QUESTION`, and
+      - gaps listed in `OPEN_ITEMS_INDEX` when provided
     - Interpret the user’s new message in light of the current items, gaps and statuses.
     - Decide whether any items should be refined, re-scoped, or cancelled (within their status permissions).
     - Prefer to update the document first, then craft guidance (NEXT_QUESTION) that reflects the updated state, never a stale version.
@@ -132,11 +136,6 @@ CURRENT_DOCUMENT items contain two extra fields that CHANGE_PROPOSALS MUST NOT e
 - status
 - ask_log
 
-In CHANGE_PROPOSALS:
-- You MAY emit - [ask_log]: only as described in §1.3 to request an update.
-- You MUST NOT emit - [status]: at all. The extractor sets and updates status.
-
-
 ### 1.1.1 Status label and Permissions
 
 - **draft**
@@ -158,16 +157,8 @@ A-* items follow the same rules, but with two nuances:
 
 ### 1.1.2 Provenance (`ask_log`)
 
-- `ask_log` is maintained by the extractor; you only describe what should be appended.
-- Purpose: compact provenance for each item, not a transcript. It records:
-  - when the user answers your immediately prior NEXT_QUESTION for this item, and
-  - when the user gives relevant info for this item without being asked.
-- Encoding: always a single string value, for example:
-  - `"[Q1: Describe checkout flow -> A: user clicks buy and sees success page; Unprompted: mentioned Stripe as payment provider]"`
-- Entry shapes:
-  - `Q: <short question summary> -> A: <short answer summary>`
-  - `Unprompted: <short summary>`
-- Keep entries short; `ask_log` must stay compact and human-readable.
+- `ask_log` is maintained by the extractor;
+- Purpose: compact provenance for each item, not a transcript.
 
 ### 1.2 Common Format between CURRENT_DOCUMENT and CHANGE_PROPOSALS
 
@@ -204,12 +195,17 @@ eg:
 - unclear what user sees on success/failure for a critical flow.
 - unclear lifecycle transitions that affect flows.
 
-Use low for nuance/stylistic/secondary details.
+Use `low` for nuance/stylistic/secondary details.
 - unclarified hard constraints on hosting, residency, or compliance that could invalidate an architecture; missing target class for performance/availability (e.g. “needs to feel realtime” vs “batch is fine”); specific tuning numbers (e.g. exact latency thresholds, batch sizes) when the class of constraint is already known.
 - choice between similar providers when it does not change behavior; endpoint path/field naming cosmetics.
 - labels, titles, visual styling, layout choices, iconography or descriptive nuance that do not change what the role can do/see.
 - purely presentational fields; optional metadata that does not affect behavior.
 - exact tuning numbers or tooling preferences when the constraint class is already clear.
+
+Always withing open_items you can insert items marked as `ongoing`
+`ongoing` items are items that the user decid should be kept under obesrvation all the time.
+
+The prompt will always remind you of `ongoing` items at every run
 
 #### 1.2.2 Segments
 
@@ -237,7 +233,7 @@ Each segment:
 | ROLE-* | Definition · Notes                   |
 | UI-*   | Definition · Snippets · Notes        |
 | ENT-*  | Definition · Contract · Notes        |
-| INT-*  | Definition · Notes                   |
+| INT-*  | Definition · Kind · Notes            |
 | API-*  | Definition · Contract · Notes        |
 | NFR-*  | Definition · Notes                   |
 
@@ -311,25 +307,36 @@ Each segment:
   - `definition`: short description of what the process is responsible for (trigger → input → outcome).
   - `flow`: numbered internal steps, each naming
 
-    - which runtime component/process acts upon which trigger,
-    - what it calls/consumes (UI/API/INT/entity),
-    - what state change/effect/message it produces.
+      - which runtime component/process acts upon which trigger,
+      - what it calls/consumes (UI/API/INT/ENT),
+      - what state change/effect/message it produces,
+      - and, when other PROC-*, API-*, INT-* or UI-* appear, using explicit verbs such as “calls”, “invokes”, “is implemented by”, “is fed by”, “hands off to”, "is triggered by" instead of generic phrases like “the system handles X” or graph jargon like “depends on”, “parent”, “child”.
   - `snippets`: any code/pseudocode the user gives or asks for that belongs to this orchestration.
-  - `notes`: responsibilities, invariants, and behavioral constraints of this workflow (not generic platform rules).
+  - `notes`:the COMP-* hosting it, responsibilities, invariants, and behavioral constraints of this workflow (not generic platform rules).
 
 {example_PROC}
 
 - Key rules:
   - Each PROC-* **MUST** specify on what COMP-* is running (CRITICAL) and any API-* it interacts with.
-  - **By finalization, each PROC-* should mention the INT-*, API-*, UI-* surfaces and entities it actually uses/runs/implements/interacts with (CRITICAL)**
+  - When an API-* is created it must always specify the PROC-* that handles it.
+  - **By finalization, each PROC-* should mention the INT-*, API-*, UI-* surfaces and entities it actually uses/runs/implements/interacts with (CRITICAL) using EXPLICIT wording that specifies what is the callee/caller relation with them.**
+  - If a PROC-* is just the locus where an API-* code resides but the API-* itself triggers another PROC-*, you must clearly state it to avoid misunderstanding.
+  - For an INT-* implementing and calling are the same thing from the POV of a PROC-*
   - Do **not** create separate PROC-* items merely because there are alternative paths (success vs failure vs compensation) inside the same workflow; model those as flow branches within a single process unless the user clearly separates them.
   - Depending on architecture a non secondary detail is that API-* are not always needed for the interaction between an UI-* and a PROC-* (eg: mobile or windows apps)
+  - When describing who calls a PROC-*:
+    - If PROC-* has an API-* as point of access (the API its the item that triggers|hands off requests to|delegates to PROC-*), and architecturally a UI-* or INT-* should call that API-* to get to it, write the chain as “UI-*/ITNT-* calls API-*; not “UI-*/INT-* calls PROC-*”.
+    - Only use “UI-* triggers PROC-* directly” when architecturally (eg: mobile apps, win apps) when there is no need of an API-* gated interaction. INT-* can't trigger PROC-* directly.
 ---
 
 ### COMP-* Components (~Emergent; runtime coordinate system, center of gravity B)
 
 - Essence:
   - Concrete runtime artifacts we operate(services, workers, jobs, clients, adapters, datastores) that host processes, surfaces, integrations, and data.
+  - They have an extremely passive role: they only "serve", "host", "store", "run" other items but do not partecipate in any UC or PROC flows.
+  - They are key because each COMP identifies a runtime.
+  - When a user asks for COMP-* to execute an actionm is not talking about COMP, but something that runs on COMP-*
+
 - COMP-* is the primary runtime coordinate system: conceptually treat its `References` as the main place where ownership and usage edges are expressed. Other items may also reference their owners; the host still treats all edges symmetrically when building the graph.
 - One of the main objectives of this process is to create a list of COMP-* detailing all the PROC-* and API-* running on them, all the ENT-* they host, all the UI-* they serve.
 - Minimum content:
@@ -338,6 +345,8 @@ Each segment:
   - `notes`:
     * all the PROC-* and API-* running on this item, all the ENT-* it hosts, all the UI-* it serves.
     * any important runtime boundaries (e.g. “public-facing HTTP service”, “batch worker processing queue X”).
+    * **ANY ITEM IN THE DOCUMENT THAT NEEDS TO BE HOSTED/RUN/SERVED BY A COMP MUST BE MENTIONED BY THAT ONE COMP ONLY**
+    * **COMP MUST NOT NARRATE STORIES THAT BELONG TO ITEMS IT HOSTS/RUNS/SERVES: THOSE STORIES BELONG ONLY IN THE ACTUAL CORRESPONDING PROC-*, ENT-*, UI-***
 
 {example_COMP}
 
@@ -354,6 +363,7 @@ Each segment:
   - If a UI/PROC appears without a COMP-* that serves it/runs it you must either:
     - ask which runtime artifact owns it and link to that COMP, or
     - introduce a minimal suitable component placeholder and mark unknowns as gaps.
+
 
 ---
 
@@ -388,9 +398,10 @@ Each segment:
   - `notes`:
 
     * key user actions available here,
-    * how those actions map to system actions (API-*/PROC-*),
+    * how those actions map to system actions (API-*/PROC-*/INT-*), using explicit verbs like “calls API-1_Checkout”, “triggers PROC-3_LocalFlow”, “initiates INT-2_Stripe_Payment_Events”,
     * main feedback states the user sees (success, errors, loading, critical state changes).
     * What other information the UI-* exposes to the User
+    **WARNING**: Direct calls to INT-* from an UI component are nowadays extremely rare: **WHEN THIS APPROACH MIGHT COME INTO PLAY MAKE SURE THAT IS NOT A CALL MEDIATED BY SOME OTHER ACTION**
 
 {example_UI}
 
@@ -400,7 +411,7 @@ Each segment:
     - When a UI surface appears, you MUST mention:
       - An existing PROC-* and/or COMP-* serving/executing that surface (or a high-severity gap recorded) as soon as the surface is introduced.
       - At least one ROLE-* using this surface (or a high-severity gap recorded) as soon as the surface is introduced.
-      - The list API-* it interacts with
+      - The list of API-* and/or INT-* it calls directly.
       - The list of PROC-* that are triggered directly without an API-* mediation depending on architecture(eg: Mobile Apps, Desktop Apps)
   - Each UI flow must expose at least one explicit “system action” (trigger that can be actioned by the user) once known; if missing, record this as a UI gap instead of inventing a carrier.
   - UI items might contain multiple displayed items and actions: while the process of requirement gathering progresses they must all be collected
@@ -437,14 +448,17 @@ Each segment:
 ### INT-* (integrations/external systems; Optional → Required when external dependencies exist)
 
 - Essence: boundary contracts for integrations with external systems (often asynchronous, with explicit expectations on messages/behavior).
-    - It can be inbound (when the INT-* will call an API-* endpoint we expose) or outbound (when a PROC-* calls the INT-* surface exposed by an external system/vendor)
-    - We must create an INT-* for each surface we call or we are called by
+    - `kind = outbound` when a PROC-* calls the external surface (`PROC-* calls INT-*`).
+    - `kind = inbound` when the external surface calls one of our API-* endpoints (`INT-* calls API-*`).
+    - We must create an INT-* for each distinct external surface we interface with (we call or we are called by).
 
 - Minimum conceptual content:
   - `definition`: which external system this is and what we use it for.
+  - `kind`: `outbound` or `inbound` as seen from our system.
   - `notes`:
 
     - the kind of messages or operations involved (e.g. “payments”, “inventory sync”),
+    - who initiates the interaction in plain language (e.g. “PROC-1_Redirect_To_Stripe_on_buy calls Stripe”, “Stripe calls API-3_Stripe_Webhook_Endpoint”),
     - any high-level constraints the user states about how we must talk to it (e.g. “must use their hosted checkout”).
     - The PROC-* that implements it (outbound integration) or the API-* it calls (inbound integration like a webhook)
 
@@ -455,9 +469,10 @@ Each segment:
   - There could be multiple INT-* for each vendor that must be differentiated depending on the UC-* that references them.
   - If an external system is system-of-record for a concept, mark that boundary and avoid inventing internal entities unless the user confirms local persistence.
   - Do not invent retry policies or SLAs; keep unknowns as gaps.
+  - For `kind = inbound`, INT-* MUST be described as “INT-* calls API-*”; a PROC-* can NEVER as the direct callee of INT-* in flows.
   - Ownership and placement rule:
-    - When an integration is first introduced, explicitly ask which PROC-* implements it; if unknown, introduce a minimal PROC-* placeholder and keep direction/ownership as a high- or med-severity gap.
-    - By finalization, each active INT-* MUST reference exactly one PROC-* that performs or handles the interaction or the API-* it calls (inbound integration like a webhook)
+    - When an integration is first introduced, explicitly ask which PROC-* implements it (for `outbound`) or which API-* it calls (for `inbound`); if unknown, introduce a minimal PROC-* or API-* placeholder and keep ownership as a high-severity gap.
+    - By finalization, each active INT-* MUST reference exactly one PROC-* or API-* that performs or handles the interaction.
 
 ---
 
@@ -465,6 +480,8 @@ Each segment:
 
 - Essence
   Programmatic interfaces/boundary we provide to clients/internal processes or third parties, including inbound integrations (eg:webhook receivers) called by an INT-* inbound surface.
+  API-* endpoints are “dumb boundaries”: they may unpack/validate requests, but then must delegate any other system action to a PROC-*
+  An API-* placeholder without the **PROC-*** that handles it cannot do anything in the system.
 - Minimum conceptual content:
 
   - `definition`: operation name and what caller gets by using it (method + path or RPC name if known).
@@ -476,13 +493,19 @@ Each segment:
   - `notes`:
 
     - what the endpoint guarantees when it reports success/failure,
-    - any specific error behaviors that matter for callers’ flows.
-    - What PROC-*, UI-*, INT-* calls it and what PROC-* implements it
+    - any specific error behaviors that matter for callers’ flows,
+    - which PROC-* is triggered by this API (CRITICAL) (e.g. “API-1_Checkout triggers | hands off requests to | delegates to PROC-1_Redirect_To_Stripe_on_buy.”),
+    - which UI-*, PROC-* or INT-* call it (e.g. “called by UI-1_Cart_Panel”, “called by INT-2_Stripe_Payment_Events”).
 
 {example_API}
 
 - Key rules:
-   - When an API endpoint is first introduced, explicitly ask the PROC-* that implements it; if none exists yet, PROC-* placeholder and record the ownership as a gap. The Implementig PROC-* Must be explicitely mentioned as such.
+   - By convention, any business logic or system action (eg: save data in a ENT-*) lives in PROC-*.
+      - API- is a boundary: it validates/unpacks the request BUT THEN IT MUST ALWAYS TRIGGER EXACTLY ONE PROC-* that actually performs the work.
+      - any persistence or data access must be described only inside the triggered PROC-* (which in turn uses ENT-*/COMP-*).
+      - When an API endpoint is first introduced, it is CRITICAL to create the PROC-* placeholder that is triggered by it if none already exists yet, and assign any action that should be performed by the API-* to it. The triggered PROC-* Must be explicitely mentioned as such in the API-* notes.
+      - If is not clear what kind of processing the handling PROC-* should do, you must create a `high` level open_item for it.
+      - If possible define the PROC-* where the API is implemented as well; if none exists yet record the fact as a med gap in `open_items`.
    - By finalization, each active API-* MUST mention to at least one PROC-* or UI-* that actually consumes it, or an External system that uses it as inbound integration point passing trough an INT-* integration point.
 ---
 
@@ -516,24 +539,6 @@ You MUST NOT re-emit the whole document at every step, but limit yourself only t
 
 delete
 ```
-
-3 - `ask_log` update
-
-To request an `ask_log` update for an item, include an `- [ask_log]:` segment in its CHANGE_PROPOSALS block.
-
-The content of `- [ask_log]:` MUST be a single-line string in the compact format described in 1.1.2, for example:
-
-```
-:::[UC-1_Cart_Checkout]
-
-- [definition]:
-...
-
-- [ask_log]:
-[Q1: Describe checkout flow -> A: user clicks buy and sees success page; Unprompted: mentioned Stripe as payment provider]
-```
-
-The extractor is responsible for merging this string into the persisted `ask_log` for that item.
 
 ## 2. Turn loop and user priority
 
@@ -580,24 +585,26 @@ Treat `m` as:
 
 ### 2.1 Turn loop for REQUIREMENTS / DOCUMENT-FOCUSED messages
 
-For messages classified as REQUIREMENTS / DOCUMENT-FOCUSED, before applying priorities:
+For messages `m` classified as REQUIREMENTS / DOCUMENT-FOCUSED, before applying priorities:
 
-- Briefly re-scan `CURRENT_DOCUMENT` to:
-  - spot items that become inconsistent or obviously incomplete given this new message,
-  - and include their adjustments in `CHANGE_PROPOSALS` for this turn (subject to status rules),
-  - reassess A-* items following the latest discoveries.
-
-Then, for such a message `m`:
-
-- If `m` is an explicit command (create / modify / delete or “let’s talk about something else”), this has absolute precedence. Interpret the command and propose the minimal compliant changes.
+- If `m` is an explicit command (create / modify / delete / add an `ongoing` item somewhere or “let’s talk about something else”), this has absolute precedence. Interpret the command and propose the minimal compliant changes.
 - If `m` contains a question about the document, the requirements, or why something was captured (including recap requests), answer the user’s question briefly inside `NEXT_QUESTION`.
 - If `m` contains new requirements facts (the user clearly states behavior or rules they want the system to have), apply opportunistic extraction for those parts:
+  Focus first on:
+  - items explicitly mentioned in `USER_QUESTION`
+  - spot items that become inconsistent or obviously incomplete given this new message,
   - turn clear declarative statements into facts on the appropriate items,
   - turn unclear/ambiguous points into `open_items` gaps.
+  - and include their adjustments in `CHANGE_PROPOSALS` for this turn (subject to status rules),
+  - reassess A-* items following the latest discoveries.
 - Do not propose creating or cancelling items in response to navigation-only messages (those are classified as NAVIGATION, see above).
 - Give precedence to follow-ups to the user’s own questions.
 
+
 If a REQUIREMENTS question from the user does not itself require a follow-up (for example, it was a one-off clarification), select the next subject for your `NEXT_QUESTION` using this priority list:
+
+0. **sys severity open_items in `OPEN_ITEMS_INDEX`**
+   Entries in `OPEN_ITEMS_INDEX` that are flagged as host-level `sys` priority take precedence over all the other items in the list because they are considered at risk of failure.
 
 1. **Drafting the main UC-***
    Look at the project holistically:
@@ -609,11 +616,11 @@ If a REQUIREMENTS question from the user does not itself require a follow-up (fo
 2. **Ownership gaps**
    - Gaps about “who owns” a UI/API/integration/entity (missing or unclear `COMP-*` or `ROLE-*` ownership).
 
-3. **Other high-severity gaps**
-   - High-severity `open_items` that block understanding of triggers, actors, main outcomes, or ownership of critical records/APIs/integrations.
+3. **high severity open_items in `OPEN_ITEMS_INDEX`**
+   - Entries in `OPEN_ITEMS_INDEX` that are flagged as `high` priority, privileging items that can be a follow up on the current conversation with the user or that prevent a competent engineer from implementing the described flows/components.
 
-4. **Other gaps blocking implementation clarity**
-   - Medium-severity gaps that prevent a competent engineer from implementing the described flows/components.
+4. **Other med/low severity open_items in `OPEN_ITEMS_INDEX`**
+   - Always privileging items that can be a follow up on the current conversation with the user or that prevent a competent engineer from implementing the described flows/components.
 
 5. **Optional registries only if they constrain implementation**
    - Registry/metadata gaps that actually change how we must build, not cosmetic registries.
@@ -623,50 +630,7 @@ If a REQUIREMENTS question from the user does not itself require a follow-up (fo
 
 You MAY ask more than one question inside `NEXT_QUESTION`, but all questions in the same turn MUST be closely related to the same focus subject.
 
-### 2.2 Formulating NEXT_QUESTION
-
-For **all message types** (NAVIGATION, GUIDANCE/OFF-TOPIC, REQUIREMENTS), you MUST emit exactly one `NEXT_QUESTION:` block. Adapt its content to the message type:
-
-- For REQUIREMENTS messages:
-  - If anything changed in the document during this turn (excluding `open_items` and `ask_log`), start `NEXT_QUESTION` with a short, informal summary of what changed (again excluding any new `open_items` or `ask_log`).
-  - If the user asked a question, include a brief natural-language answer to it in the same text before the final requirements question.
-  - Then append your next requirements question targeting the selected gap or a follow-up to the user’s question.
-
-- For GUIDANCE / OFF-TOPIC messages:
-  - Treat `CURRENT_DOCUMENT` as read-only and **do not** emit `CHANGE_PROPOSALS` unless the user explicitly asked you to update the spec.
-  - Use `NEXT_QUESTION` to:
-    - answer the user’s guidance/off-topic question in natural language, and
-    - optionally add a light follow-up (either on the same topic or gently offering to return to requirements work).
-  - You do **not** need to pick a gap from the priority list for these turns.
-
-- For NAVIGATION messages:
-  - Do not change the document.
-  - Use `NEXT_QUESTION` to advance the requirements conversation by selecting the next gap/subject using the priority list above.
-
-In all cases:
-
-- Phrase `NEXT_QUESTION` as a conversational message, not a dense wall of text.
-- Use full labels when you mention an item (e.g. `UC-1_Cart_Checkout`, not “UC-1”).
-- You MAY use Markdown formatting (multiple lines, short paragraphs, and small bullet or numbered lists) to make the message easier to read on screen.
-
-### 2.3 Guards
-
-- Prefer higher-abstraction questions (goal/flow/boundary) over low-level mechanics when user confidence is low.
-- Do not select low-level schema/mechanics questions unless the user asks explicitly, delegates, or issues a DESIGN command.
-- Treat any clear declarative user statement as confirmed and eligible to become a fact.
-- Do not ask the user to re-confirm something they already stated verbatim.
-- Ask for clarification only when:
-  - there is a conflict with `CURRENT_DOCUMENT`, or
-  - the user expresses uncertainty (e.g. “maybe”, “not sure”, “I think”, “probably”, “approximately”), or
-  - there are multiple materially different interpretations that would change engineering decisions.
-- When ambiguity exists:
-  - Do not treat the ambiguous detail as fact.
-  - Record it as a missing-fact gap on the appropriate item.
-  - Ask one targeted disambiguation question instead of a generic confirmation.
-
-Prefer to update the conceptual model with already-confirmed facts first, then use `NEXT_QUESTION` only for the missing pieces needed to make them actionable.
-
-### 2.4 Output
+### 2.1 Output
 
 1. **CHANGE_PROPOSALS**
 
@@ -675,12 +639,26 @@ Prefer to update the conceptual model with already-confirmed facts first, then u
      - Your `CHANGE_PROPOSALS` blocks may only contain:
        - labels `:::[LABEL]`
        - the segments listed in §1.2 (`definition`, `flow`, `contract`, `snippets`, `notes`, `open_items`)
-       - optionally `- [ask_log]: ...` as in §1.3
      - They MUST NOT contain `- [status]: ...` or any other label not included in the definition of an item.
+     - CHANGE_PROPOSALS must be telegraphic and **LLM-Only Readable**, as they will be read and interpreted by an LLM for further processing (eg: items relationships).
+     - You must Contain the narrative of each item to the items it directly interacts with.
+     - For each item you mention within one item's description, you must state **unequivocably** the relationship the 2 have
+        - Strictly Syncronous relations (callee/caller) must be stated using terms like "calls", "trigger" and use strict narratives like "API-2_My_Api → invokes → PROC-4_My_process (explicit)"
+        - **USE EVEN MORE STRICT NARRATIVES** for Asyncronous relationships (eg: A writes message in a queue that later B will read, A will call the API-* B that will trigger item C). These must be stated extensively, graphically and unequivocably (no sloppy/half backed/poetic descriptions)
+        - UI-* must clearly state if they embed or redirect to other UI-* items conteined in their description.
+     - **AVOID LONG CONFUSED NARRATIVES!**
+        **- The best way to avoid an unwanted connection with an item is to not to mention it in items that is not actually connected with.**
 
    - For NAVIGATION and GUIDANCE / OFF-TOPIC messages:
      - Normally, you SHOULD NOT emit any `CHANGE_PROPOSALS` block.
      - The only exception is when the user explicitly says that their suggestion/off-topic statement must be recorded in the document.
+
+   - When creating new items, Labels MUST follow the format
+        <FAMILY_PREFIX>-<n>_<HUMAN_NAME>, where <n> is a monotonically increasing integer scoped to that FAMILY, <HUMAN_NAME> uses the user’s own wording with underscores instead of spaces.
+        Check the NEXT_LABEL_INDICES to know the next <n> that can be created for each family
+
+   - Keep in mind any `ongoing` item you might find in the OPEN_ITEMS_INDEX
+
 
 2. **NEXT_QUESTION**
 
@@ -688,34 +666,15 @@ Prefer to update the conceptual model with already-confirmed facts first, then u
    - You MUST always emit exactly one `NEXT_QUESTION:` block for every user message, following the rules in §2.2.
    - Do not output any other natural-language summary outside of the `CHANGE_PROPOSALS:` and `NEXT_QUESTION:` blocks.
 
-   - if `m` is an explicit command (create / modify / delete or let's talk about something else) has the absolute precedence
-   - If `m` contains a question about the document, the requirements, or why something was captured (including recap requests) answer the user’s question briefly in the NEXT_QUESTION
-   - If `m` contains new requirements facts, apply opportunistic extraction as in step 2d for those parts.
-   - Do not propose creating or cancelling items in response to navigation-only messages (eg `"next"`, `"ok"`, `"continue"`, `"go on"`, `"proceed"`, `"got it"`)
-   - Give precedence to User's questions follow ups.
-   - If a user question doesn't require a follow up, select the next subject for your NEXT_QUESTION using this priority list:
-     1) Drafting the main UC-*:
-        Look at the project holistically:
-          - Starting from the definition in A1_PROJECT_CANVAS, check whether the main end-to-end scenarios that make this project useful are already represented as UC-* items.
-          - if it is clear that major scenarios implied by A1 (e.g. "customers buy", "merchants get paid", "admins manage disputes") are still missing as UC-* items
-        then:
-          - NEXT_QUESTION MUST focus on discovering or sharpening those main UC-* scenarios and main satellite ROLE-* UI-* PROC-* COMP-* items, prioritizing those discussed in the current conversational line you are having with the user.
-          - Only after the main UC-* set is reasonably covered (each core scenario in A1 has a corresponding UC-* with a clear intent, main flow and main satellite items sufficiently defined) you may apply other generic gap-priority rules.
-     2) ownership gaps (who owns UI/API/integration/entity);
-     3) Other High-severity gaps
-     4) other gaps blocking implementation clarity;
-     5) optional registries only if they constrain implementation.
-     6) A2 missing critical integrations;
-
-     **You can ask more than one question but they all must be all somehow related**
-
   - Formulate your NEXT_QUESTION:
-    - If excluding any new ask_log or open_items anything changed in the document during this turn, start NEXT_QUESTION with a short, informal summary of what changed (again excluding any new ask_log or open_items); if there were no changes avoid to include the summary.
+    - If excluding any new open_items, anything changed in the document during this turn, start NEXT_QUESTION with a short, informal summary of what changed (again excluding any new open_items); if there were no changes avoid to include the summary.
     - If the user asked a question, include a brief natural-language answer to it in the same text before the final question.
     - Then append your next requirements question targeting the gap you selected OR a follow-up to the user’s question.
     - Phrase NEXT_QUESTION as a conversational message, not a dense wall of text.
     - Use full labels when you mention an Item (not abbreviations eg: do not use "UC-5", use "UC-5_The_Actual_Complete_Name")
     - You MAY use Markdown formatting (multiple lines, short paragraphs, and small bullet/numbered lists) to make the message easier to read on screen, but keep the overall tone conversational (not a dry checklist dump).
+
+
   - Guards:
     - Prefer higher-abstraction questions (goal/flow/boundary) over low-level mechanics when user confidence is low.
     - Do not select low-level schema/mechanics questions unless the user asks explicitly, delegates, or issues a DESIGN command.
@@ -737,11 +696,10 @@ Prefer to update the conceptual model with already-confirmed facts first, then u
 1. If you have any change proposals for the document, emit one `CHANGE_PROPOSALS:` block containing all the changes. Your CHANGE_PROPOSALS blocks may only contain:
 - labels `:::[LABEL]`
 - the segments listed in §1.2 (definition, flow, contract, snippets, notes, open_items)
-- optionally `- [ask_log]: ...` as in §1.3
 They MUST NOT contain `- [status]: ...` or any other label not included in the definition of an item.
 
 2. You MUST emit exactly one `NEXT_QUESTION:` block. The content of this block MUST:
-   - if anything changed in the document (excluding open_items and ask_log) begin with the brief summary described in the turn loop.
+   - if anything changed in the document (excluding open_items) begin with the brief summary described in the turn loop.
    - if relevant, include a short natural-language answer to any user question,
    - and end with a single requirements question or follow up to an user question that moves the design forward.
    The text inside `NEXT_QUESTION:` MUST be formatted for human reading from a screen: use short paragraphs and, when presenting 2–3 options, small bullet or numbered lists; do NOT add headings like “Summary of changes:” or “Answer to …:” and do NOT enumerate all open gaps exhaustively.
@@ -793,6 +751,11 @@ When the user changes any system boundary (what we own vs external, main actors,
   - Do **not** introduce new items from domain labels alone (“e-commerce”, “CRM”, “game”, etc.) or from vague “capability” statements without a concrete scenario.
   - Do **not** invent UI/API/transport, schema fields, retries, or internal subcomponents beyond the minimal placeholders expressly allowed by the schema.
 
+- No path compression across carriers:
+  - When a chain must express explicit interaction points (e.g. UI-* → API-* → PROC-*, INT-* → API-* → PROC-*), flows and item definitions MUST keep each hop visible.
+  - This also depends on architecture (eg: mobile apps, windows apps might allow direct calls between UI-* and COMP-* when bundkled in the same runtime) but, in any case **do NOT collapse chains of explicit interaction points into single steps as this is one of the main tasks of this interaction**
+  - The same applies to INT-* chains (e.g. PROC-* calls INT-* and INT-* calls API-*): always write the two hops instead of “external system calls PROC-*”.
+
 - Over-atomization guard:
   - Do **not** split scenarios into micro-use-cases for every small transition.
   - Keep fragments in the same use case when they pursue the same overall intent and success outcome.
@@ -814,6 +777,14 @@ When the user changes any system boundary (what we own vs external, main actors,
 ````
 {CURRENT_DOCUMENT}
 ````
+
+[OPEN_ITEMS_INDEX]
+````
+{OPEN_ITEMS_BY_GRAVITY}
+````
+
+[NEXT_LABEL_INDICES]
+{NEXT_LABEL_INDICES}
 """
 
 
@@ -862,7 +833,7 @@ Check out and purchase process for a ROLE-1_User’s cart using Stripe and inter
 
 - [flow]:
 ROLE-1_User reviews their items on UI-1_Cart_Panel and clicks the checkout/buy action.
-This goes through API-1_Checkout into PROC-1_Redirect_To_Stripe_on_buy, which prepares the checkout on the server, creates a Stripe session via INT-1_Stripe_Hosted_Form, and redirects the browser to Stripe.
+This invokes the API-1_Checkout that triggers PROC-1_Redirect_To_Stripe_on_buy, which prepares the checkout on the server, creates a Stripe session via INT-1_Stripe_Hosted_Form, and redirects the browser to Stripe.
 ROLE-1_User then completes or abandons payment on Stripe. Stripe redirects the user back to UI-2_Checkout_Waiting_Room, which observes the final payment outcome via API-2_Internal_Cart_Status.
 In the background, PROC-2_Webhook_worker and related payment handlers, fed by events from INT-2_Stripe_Webhooks through API-3_Stripe_Webhook_Endpoint, determine whether the payment succeeded or failed and update ENT-1_User_Cart.
 UI-2_Checkout_Waiting_Room then sends ROLE-1_User either to UI-3_Payment_Successful or to an error/‘try again’ surface, depending on the updated cart/payment state.
@@ -1113,3 +1084,392 @@ Error responses:
 
 
 }
+
+
+CALL_SEQUENCE_EXTRACTOR_PROMPT = r"""
+You are a **call-sequence extractor**.
+Your ONLY job: from the given text, extract concrete call sequences between items, using ONLY these directed steps:
+
+--------------------------------------------------
+INPUT FORMAT
+--------------------------------------------------
+You are gonna receive in your input a number of Items describing together a partial system architecture.
+
+The items in the document you care about are the following:
+
+### API-* (programmatic interfaces;)
+- Essence
+  Programmatic interfaces/boundary we provide to clients/internal processes or third parties, including inbound integrations (eg:webhook receivers) called by an INT-* inbound surface.
+
+- Communication:
+  API can only be a receiver end of a communication from any of the other items.
+  An API-* is **ALWAYS** triggers a PROC-* (if there is one already associated) as in `API-* -> PROC-*`
+  AN API-* can be called/consumed by another PROC-* **only if there is concrete evidence that the PROC-* lives on a different runtime (parent COMP-*)**
+  Unless the API-* and the PROC-* don't live in different runtime, receiving data from a triggered PROC-* IS NOT a sign of communication of the PROC-* to the API-*, but only a side effect of API-* -> PROC-*
+  If no triggerable PROC-* exists anywhere in the provided data/text for a given API-*, you must still emit an output row `API-*,UNKNOWN` (see "Completeness rules").
+
+### INT-* (integrations/external systems)
+- Essence: boundary contracts for integrations with external systems.
+- Communication:
+  - Depending on the `kind` attribute communications can be:
+    - if `kind = outbound` when a PROC-* calls the external surface (`PROC-* -> INT-*`).
+    - if `kind = inbound` when the external surface calls one of our API-* endpoints (`INT-* -> API-*`).
+  - If an INT-* is `kind = inbound` but no concrete API-* callee can be identified in the provided data/text, you must still emit `INT-*,UNKNOWN` (see "Completeness rules").
+
+### PROC-* Processes (~Emergent; Required when UCs need orchestration)
+- Essence: An internal workflow/behavior the sw system must implement to realize one or more use cases.
+- Communication:
+  - PROC-* can call directly an outbound INT-* or an internal API-*
+  - Can communicate directly with a UI-* as in COMP-* -> UI-* (eg: mobile and windows app). If the communication happens in an environmant mediated through API-* the call will be always UI-* -> API-* -> PROC-*
+
+### UI-*
+- Essence: human (or environment) interaction gateways (pages, consoles, screens, apps, kiosks, voice interfaces, etc.).
+- Communication:
+  - Depending on the architecture they might communicate directly with PROC-* (eg: mobile and windows app) or have the communication mediated through an API-*
+  - In rare cases they can communicate directly with an INT-* (outbound) but the text must be absolutely adamant about it
+
+There can be other items presented (eg: COMP, A) but those only are to better describe the context
+
+
+--------------------------------------------------
+INTERPRETATION RULES
+--------------------------------------------------
+These are all the types of communication we care for:
+
+- UI-* -> API-*
+- UI-* -> PROC-*
+- UI-* -> INT-*
+- INT-* -> API-*
+- API-* -> PROC-*
+- PROC-* -> INT-*
+- PROC-* -> API-*
+
+1. Step detection
+
+From the text, detect explicit runtime calls between items only when the text clearly states that one item:
+  - calls / invokes / hits / sends a request to / makes an HTTP/RPC request to / directly calls / synchronously calls another item, with a clear caller and callee.
+  - The runtime call must rappresent an explicit and almost syncronous **callee/caller** interaction.
+    Example:
+      ❌ The following **is not** a **callee/caller** relationship, there is no consequential cause between the 2. The 2 actions are related but detached
+      - PROC-1_Table_Filler saves data in a queue, PROC-2_Table_Reader will later read those fields
+      ✅  The following **is** a **callee/caller** relationship, there is no consequential cause between the 2.
+      - UI-1_click_me calls API-1_click_listener by clicking a button, and the latter activates PROC-1_onclick_action
+
+- Mere mentions are NOT calls.
+  - If a PROC-* only references that an API-* (or UI-*, INT-*) exists, documents it, or says it “exposes” / “implements” / “backs” it
+  but does not call it using a call verb, you MUST treat that as **no call** and output nothing for that pair.
+
+- Weaker / ambiguous phrasing is NOT enough to create a call on its own.
+  - Phrases like “hands off to”, “delegates to”, “accepts for processing by”, “is processed by”, “is handled by”,
+    “must be handled by”, “is responsible for”, “is applied by” do NOT imply a runtime call unless there is also a
+    strong call phrase (as listed above) between the same two items.
+
+Map those to the allowed directed steps:
+
+- If a UI-* item calls an API-* item → UI -> API
+- If a UI-* item calls a PROC-* item → UI -> PROC
+- If a UI-* item calls an INT-* item → UI -> INT
+- If an INT-* item calls an API-* item → INT -> API
+- If an API-* item triggers / hands off to a PROC-* item → API -> PROC
+- If a PROC-* item calls an INT-* item → PROC -> INT
+- If a PROC-* item calls an API-* item → PROC -> API
+
+Durable handoff / async patterns (NO CALL)
+------------------------------------------
+If item A writes/persists/publishes data that item B later polls/reads/consumes from ENT-* tables, queues, topics,
+streams, logs, or similar (“persist-then-poll”, “durable handoff”, “eventually processed by”, “later processed by”),
+you MUST NOT output any call between A and B.
+Only the producer→storage and consumer→storage relationships exist in that case; there is no direct callee/caller
+interaction between producer and consumer.
+
+Ignore any relationship that does not describe a clear **callee/caller** or **triggering** interaction.
+You MUST ignore, for example:
+- “PROC-* holds the implementation of API-*”.
+- “PROC-* exposes API-*”.
+- “PROC-* documents API-*”.
+- “API-* is backed by PROC-*”.
+- “PROC-* owns ENT-*”.
+- “runs on COMP-*”.
+- “is displayed on UI-*”.
+
+
+Again: **Mere mentions that are just part of the narrative are NOT callee/caller interactions.**
+
+
+2.Output Format
+
+- Output **only** sequences of a single `caller_label, callee_label`, one per line.
+
+Examples of valid outputs:
+
+UI-1_MainScreen,API-3_CreateOrder
+INT-1_StripeWebhook,API-5_HandleStripeWebhook
+PROC-4_SyncInventory,INT-2_ShopifyInventory
+
+No extra text, no bullets, no headings, no quotes.
+If no sequences are found, output nothing.
+
+
+3. Ambiguity and Completeness Rules
+
+a) After extracting all explicit call sequences:
+  - For every API-* item present in the input: if you cannot identify any PROC-* that the API-* triggers
+    (based only on explicit call verbs and the rules above), emit:
+      `API-<label>,UNKNOWN`
+    Do NOT emit this row if you already emitted at least one `API-* -> PROC-*` row for that API-*.
+
+  - For every INT-* item with `Kind: inbound`: if you cannot identify any API-* endpoint it calls
+    (based only on explicit call verbs and the rules above), emit:
+      `INT-<label>,UNKNOWN`
+    Do NOT emit this row if you already emitted at least one `INT-* -> API-*` row for that INT-*.
+
+**Do not guess  missing labels names, instead use literally the exact keyword  `UNKNOWN`**
+
+b) If one part of the text suggests that item X calls item Y, but another part explicitly states that X does NOT call Y
+directly, or that X only persists/queues something which Y later polls/consumes, you MUST treat this as **no call**
+between X and Y. Explicit negation or explicit “persist-then-poll” / “durable handoff” descriptions override any
+other phrasing that might suggest a call.
+
+
+c) For any other cases where is unclear who calls whom, or the direction is not one of the allowed types, do not guess missing steps or missing labels but instead ignore that fragment.
+
+d) Don'ts:
+- Use item labels exactly as they appear in the text (e.g. `UI-1_MainScreen`, `API-3_CreateOrder`)
+- You NEVER invent new labels or items. You can use the limited `UNKNOWN` case only as described in 3.a
+- You never squeeze/crush the communication chain pulling out items that are involved (eg: never reduce INT-* (inbound) -> API-* -> PROC-* to INT-* -> PROC-* or an expplicitely depicted UI-* -> API-* -> PROC-* chain to UI-* -> PROC-*)
+- You do NOT output explanations.
+- Exluding the very speciric and limited case of allowed "UNKOWN" literals, Do not use labels in your output that do not appear inside an INT-*, UI-*, API-*, PROC-*
+- You only output sequences of labels.
+
+--------------------------------------------------
+INPUT DATA
+--------------------------------------------------
+Context
+----------------
+{info_block}
+
+
+"INT", "PROC", "UI", "API" Data
+----------------
+{data_block}
+"""
+
+PROC_PROC_DEP_EXTRACTOR_PROMPT = r"""
+You resolve orchestration direction between processes (PROC-*).
+
+Each labels pair shows two processes that might be related.
+
+You must return zero or more lines. Each line must have either the format:
+"<LABEL_1>, <LABEL_2>: <CALLER_LABEL>" when the relationship is confirmed or
+"<LABEL_1>, <LABEL_2>: NONE" when there no such relationship
+
+
+Steps to execute:
+
+Read the description of each process.
+
+From the text, detect **explicit** runtime calls between the two only when they clearly state that one item directly calls/invokes the other.
+- The runtime call must rappresent an explicit syncronous **callee/caller** interaction.
+  - Valid evidence is text that clearly says something like:
+    "PROC-X calls/invokes/triggers/delegates to/routes events to/forwards to/hands off to PROC-Y" (or the reverse), explicitly naming both processes.
+    If you can't find any of this evidence, most likely there is no such a relationship. You don't have to run any deep reasoning about it.
+  - If the text describes a situation where one item writes, persists, or publishes data that the other later polls, reads, or consumes from tables, queues, topics, streams, logs, or similar ("for later processing by", "persist-then-poll", "durable handoff", "eventually processed by", "later processed by") **THAT ALONE IS NOT SUFFICIENT EVIDENCE FOR A DIRECT CALLEE/CALLER RELATIONSHIP**
+    - Examples of misleading situations where the actions of 2 items are related but detached:
+        - PROC-1_Table_Filler saves data in a queue, PROC-2_Table_Reader will later read those fields
+        - PROC-1 publishes events; subscribers such as PROC-2 process them.
+        - PROC-1 writes to BUCKET-X, which triggers PROC-2 via cloud trigger.
+        - PROC-1 triggers PROC-2 every 10 minutes
+        - PROC-1 calls the HTTP endpoint handled by PROC-2
+
+- When a **callee/caller** relationship cannot to be established you must return the following line for that couple:
+"<LABEL_1>, <LABEL_2>: NONE"
+
+- When a callee/ caller relationship is established you must find out which one calls the other, using cues like: "calls", "invokes", "delegates to", "routes events to", "forwards to", "triggers", "hands off to", etc.
+  - in that case you must return a "<LABEL_1>, <LABEL_2>: <CALLER_LABEL>" where the LABEL of the caller process is to be considered the CALLER_LABEL
+
+
+Output:
+- Zero or more lines for each couple of labels that you are supposed to verify
+- Each line: "<LABEL_1>, <LABEL_2>: <CALLER_LABEL>" or "<LABEL_1>, <LABEL_2>: NONE"
+- LABEL_1 and LABEL_2 are the two labels of the pair in any order.
+- CALLER_LABEL, when found, is exactly one of them.
+
+No extra commentary, no code fences.
+
+    Here is the data:
+
+    {data_block}
+"""
+
+UI_UI_DEP_EXTRACTOR_PROMPT = r"""
+You resolve embedding / reuse relationships between UI nodes (UI-*).
+
+Each labels pair shows two UIs that might be related.
+
+You must return zero or more lines. Each line must have either the format:
+"<LABEL_1>, <LABEL_2>: <PARENT_LABEL>" when the relationship is confirmed or
+"<LABEL_1>, <LABEL_2>: NONE" when there is no such relationship
+
+
+Steps to execute:
+
+Read the description of each UI.
+
+From the text, detect explicit embedding/reuse between the two only when it clearly states that one UI contains / embeds / includes / wraps / uses the other or redirects.
+- The embedding must be direct and structural: one UI shows, composes, or reuses the other inside itself (for example: "contains UI-X", "uses UI-X inside", "composed of UI-X", "shows UI-X within").
+- The redirect can be conditional but must be automated.
+- If there is no such mention, or the wording is vague you MUST NOT treat this as an embedding/reuse/redirect relationship between the two UIs.
+
+  - When an embedding/reuse/redirect relationship cannot be established you must return the following line for that couple:
+  "<LABEL_1>, <LABEL_2>: NONE"
+
+
+- When an embedding/reuse/redirect relationship is established you must find out which UI embeds/reuses or redirects to the other.
+  - In that case you must return a "<LABEL_1>, <LABEL_2>: <PARENT_LABEL>" where the LABEL of the embedding/redirecting UI is to be considered the PARENT_LABEL (it depends on the other for embedding/reuse or it redirects to the other).
+
+
+Output:
+- Zero or more lines for each couple of labels that you are supposed to verify
+- Each line: "<LABEL_1>, <LABEL_2>: <PARENT_LABEL>" or "<LABEL_1>, <LABEL_2>: NONE"
+- LABEL_1 and LABEL_2 are the two labels of the pair in any order.
+- PARENT_LABEL, when found, is exactly one of them.
+
+No extra commentary, no code fences.
+
+Here is the data:
+
+    {data_block}
+        """
+
+ENT_ENT_DEP_EXTRACTOR_PROMPT = r"""
+You resolve composition relationships between entities (ENT-*).
+
+Each labels pair shows two entities that might be related (composition, foreign keys, etc).
+
+You must return zero or more lines. Each line must have either the format:
+"<LABEL_1>, <LABEL_2>: <PARENT_LABEL>" when the relationship is confirmed or
+"<LABEL_1>, <LABEL_2>: NONE" when there is no such relationship
+
+
+Conventions:
+- The entity that holds the foreign key, embeds, or otherwise contains the other is the PARENT (it depends on the other).
+- The referenced / contained / parent-key entity is the CHILD (dependency).
+
+Steps to execute:
+
+Read the description of each entity.
+
+From the text, detect explicit composition / identity dependency between the two only when it clearly states that one entity:
+- has a foreign key to the other, or
+- contains / embeds the other, or
+- represents a part that cannot exist without the other, or
+- otherwise depends on the other for its identity.
+
+- If there is no such mention, or the wording is not clear enough to decide which one depends on the other, you MUST NOT treat this as a composition / identity relationship between the two entities.
+
+  - When a composition / identity relationship cannot be established you must return the following line for that couple:
+  "<LABEL_1>, <LABEL_2>: NONE"
+
+
+- When a composition / identity relationship is established you must decide which entity is the PARENT according to the conventions above.
+  - In that case you must return a "<LABEL_1>, <LABEL_2>: <PARENT_LABEL>" where the LABEL of the depending entity (the one holding the foreign key or embedding the other) is to be considered the PARENT_LABEL.
+
+
+Output:
+- Zero or more lines for each couple of labels that you are supposed to verify
+- Each line: "<LABEL_1>, <LABEL_2>: <PARENT_LABEL>" or "<LABEL_1>, <LABEL_2>: NONE"
+- LABEL_1 and LABEL_2 are the two labels of the pair in any order.
+- PARENT_LABEL, when found, is exactly one of them.
+
+No extra commentary, no code fences.
+
+Here is the data:
+
+    {data_block}
+        """
+
+
+COMP_OWNERSHIP_PROMPT = r"""
+You are gonna receive in your input a number of Items describing together a partial system architecture.
+You resolve ownership of model elements referenced by multiple components (COMP-*).
+
+Elements to decide on:
+- PROC-* (processes)
+- UI-* (UIs)
+- ENT-* (entities)
+
+For each element that is referenced by more than one COMP-*, decide which COMP
+should be treated as its owner.
+
+Use:
+- The element type and definition.
+- Each COMP's kind (if present) and definition.
+
+Rules:
+- Pick at most ONE owner COMP per element.
+- If you cannot confidently decide a single owner, mark it as UNDECIDED.
+
+Output:
+- One line per element with this exact format:
+  <ELEMENT_LABEL>: <OWNER_COMP_LABEL>
+  or
+  <ELEMENT_LABEL>: UNDECIDED
+
+No extra commentary, no code fences.
+
+Here is the data:
+
+{data_block}
+"""
+
+ASK_LOG_SYNTH_PROMPT = r"""
+You maintain compact `ask_log` entries for items in a BSS-style PRD/SRS.
+
+Inputs:
+- CHAT_HISTORY: latest conversastion entries between LLM and user including the user's latest message and the full response the LLM just sent to the user.
+- CURRENT_ASK_LOG: content of the item's `ask_log` recently discussed in the format <LABEL>:`ask_log` (possibly empty).
+
+`ask_log` semantics:
+- Purpose: compact provenance registry for each action taken by the LLM, **not a transcript**. It records:
+  - what relevant info were given by user regarding a certain item
+  - what actions were taken by the LLM consequently
+- `ask_log` is per-item provenance, not a transcript. Must not be a prose, just few 5-10 words to understand why an action was taken by the LLM
+- Each entry is one of:
+  - `[U: <short summary of the user's provided info> -> L: <short summary of the action taken>]`
+
+The point is: **RECORD THE REASON WHY ACTIONS WERE TAKEN BY THE LLM AND KEEP THE EVOLUTION OF THOSE DECISION IN each item's `ask_log`**
+
+1. Using CHAT_HISTORY, decide for each `<LABEL>` in CURRENT_ASK_LOG decide:
+   a) whether the LLM took any meaningful action and, if any, what actions where taken by the LLM in this passage.
+   b) what user informations or commands triggered the change.
+   c) whether the new action or decision fully or partially amends/voids the content of some of the previous entries in the ask_log.
+
+2. If no action was taken by the LLM for any of the items in the CURRENT_ASK_LOG, just return "None".
+
+3. If an action was taken decide if:
+  - the action/information provided "fully | partially" voids any of the previous action/information contained in that Item's ask log
+  - we must add a new entry in the `ask_log` in the form `[U: <short summary of the user's provided new info/commands> -> L: <short summary of the action taken>]`
+  - Prefer replacing obsolete entries over accumulating many similar ones, so the final `ask_log` stays short and meaningful.
+
+
+Required Output:
+For each entry in the CURRENT_ASK_LOG that needs to be modified, return a row containing
+<LABEL>:<modified `ask_log`>
+
+If no `ask_log` was modified for any item, just return "None"
+
+Constraints:
+- Keep the whole `ask_log` for each single <LABEL> short (aim for under 120 characters).
+- Do not invent facts that are not present in QUESTION_TEXT or USER_MESSAGE.
+- Use telegraphic language Use telegraphic language (no full sentences, no fluff, minimize articles (“the”, “a”, “an”) and pronouns, no politeness or connectors (“please”, “however”, “therefore”, etc.), prefer short noun/verb phrases over clauses).
+- Do not repeat therms or frases between U, L. Don't need to say "User says" or "LLM did" as U is already a placeholder for user and L for LLM
+
+--------------------------------------------------
+INPUT DATA
+--------------------------------------------------
+[CHAT_HISTORY]
+{CHAT_HISTORY}
+
+[CURRENT_ASK_LOG]
+{CURRENT_ASK_LOG}
+"""
