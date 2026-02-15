@@ -2,7 +2,7 @@ BSS_UC_EXTRACTOR_PROMPT = r"""
 You are UC_EXTRACTOR: a deterministic “use-case-from-narrative” extractor.
 
 Your job:
-Given SOURCE_TEXT (a narrative PRD), output ONLY a list of Usecases.
+Given SOURCE_TEXT (a narrative PRD), output ONLY a limited list of Usecases.
 Each Use Case is an outcome/architecture-oriented cluster of processes; once is collected it starts from a clear intention to achive an overall result.
 
 Raccomendations:
@@ -182,7 +182,8 @@ C) Label family semantics (hard rule)
   - Do NOT mint separate COMP-* for:
     - libraries/frameworks used inside the same process,
     - modules/components that are purely logical subdivisions (rendering module, AI module),
-    - external systems (those are represented via INT-*, not COMP-*).
+    - external systems we integrate with (those are represented via INT-*, not COMP-*).
+    - peripherals
   - COMP-* MUST NOT be described as the decider/initiator in Flow; it is a secondary actor (substrate/host) only.
   - When SOURCE_TEXT makes it clear, the responsibilities ledger of a COMP-* should list:
     - the PROC-* and API-* running on it,
@@ -486,6 +487,7 @@ UC-3_Browser_Checkout_Via_Stripe_Hosted_Form_And_Webhook_Finalization
 =====================================================================
 OUTPUT FORMAT (STRICT: OUTPUT ONLY THIS)
 =====================================================================
+**CRITICAL:** Limit yourself to emitting max {max_ingested_uc} new Usecases. Do not mention any other.
 
 **CRITICAL:** If USECASES COLLECTED SO FAR have been provided do not re-emit them. Only new usecases discovered in the execution of this prompt.
 For each new UC that must be produced, emit exactly this block (no extra commentary).
@@ -722,6 +724,8 @@ Epistemic Stance
   - **Never “repair” gaps by guessing mechanisms, defaults, flows, or structures; keep them visible as gaps until the user fills or waives them.**
 
 - Use detailed but concise, highly technical, LLM-readable language with explicit interaction verbs such as “calls”, “is implemented by”, “triggers”, “redirects to” to avid any misunderstandig over objects relations (ownership, callee/caller relationships etc)
+- (CRITICAL) Use always full label names and nt abbreviations when you mention another item (eg: UI-3_My_UI and not UI-3)
+
 ## 2. `open_items`
 
 In addition to each segment allowed in the conceptual content of each item, you can introduce a single `open_items` segment per item.
@@ -832,20 +836,23 @@ Even when they would make a rendition more semantically descriptive **You are fo
 epistemic_2_rules = {
     "PROC":"""
 
-### PROC-* Processes (~Emergent; Required when UCs need orchestration)
+### PROC-* Processes (Required when UCs need orchestration)
 
 - Essence: An internal workflow/behavior the sw system must implement to realize one or more use cases.
 - Minimum conceptual content:
   - `definition`: short description of what the process is responsible for (trigger → input → outcome).
-  - `flow`: numbered internal steps, each naming
+  - `flow`: numbered internal steps narrative from the pov of the PROC-*, enumerating:
 
-    - which runtime component/process acts upon which trigger,
-    - what it calls/consumes (UI/API/INT/ENT)
-    - what state change/effect/message it produces,
-    - and, when other PROC-*, API-*, INT-* or UI-* appear, to avoid potential misunderstandings use explicit verbs such as “calls”, “invokes”, “is implemented by”, “is fed by”, “hands off to” that illustrate the action direction/subject of the phrase
-    - Do not use generic “the system does X” or even generic graph jargon like “depends on”, “parent”, “child” here.
+    - internal processing steps,
+    - what state change/effect/message/persistence each step produces,
+    - what other items the PROC-* calls/consumes **directly** (UI-*/API-*/INT-*/ENT-*), using explicit verbs such as “call”, “invoke”, “trigger” instead of generic phrases like “the system handles X” or graph jargon like “depends on”, “parent”, “child”,
+    - limit the narration to items in the document with whom the PROC-* has explicit and synchronous direct **callee/caller** interactions with a consequential cause.
+      Negative examples:
+      - If `UI-1_click_me` calls `API-1_click_listener` which then activates `PROC-1_onclick_action` → **do not mention UI-1_click_me in the PROC-* narrative (and vice versa)**.
+      - If `PROC-1` writes/persists/publishes data that `PROC-2` later polls/reads/consumes from tables, queues, topics, streams, logs, or similar persist-then-poll, durable handoff interactions → **do not mention PROC-1 and PROC-2 in each other’s narrative**.
+
   - `snippets`: any code/pseudocode the user gives or asks for that belongs to this orchestration.
-  - `notes`: the COMP-* hosting it, responsibilities, invariants, and behavioral constraints and any extra narrative about how it interacts with UI-*, API-*, INT-*, and ENT-* that does not fit naturally in the main `flow`.
+  -  - `notes`: the COMP-* hosting it, responsibilities, invariants, and behavioral constraints of this workflow (not generic platform rules).
 
 - Examples w output format:
 ````
@@ -857,7 +864,7 @@ Server-side process that takes a pending ENT-1_User_Cart, turns it into an activ
 - [flow]:
 PROC-1_Redirect_To_Stripe_on_buy receives a checkout request from API-1_Checkout for a specific ENT-1_User_Cart.
 It verifies that the cart belongs to ROLE-1_User and is in a state that can be checked out, computes the total amount, and sets the cart status to `checkout`.
-It then calls INT-1_Stripe_Hosted_Form to create a Stripe Checkout Session, stores the returned identifiers on ENT-1_User_Cart, and returns the Stripe redirect URL back to API-1_Checkout so UI-1_Cart_Panel can redirect the browser.”
+It then calls INT-1_Stripe_Hosted_Form to create a Stripe Checkout Session, stores the returned identifiers on ENT-1_User_Cart, and returns the Stripe redirect URL back to API-1_Checkout.”
 
 - [snippets]:
 ```
@@ -879,7 +886,7 @@ def Stripe_Hosted_Form_create_session(
 ```
 
 - [notes]:
-PROC-1_Redirect_To_Stripe_on_buy runs on COMP-1_Webeserer. It does not decide payment success or failure; it only prepares checkout and hands control to Stripe.
+PROC-1_Redirect_To_Stripe_on_buy does not decide payment success or failure; it only prepares checkout and hands control to Stripe.
 
 :::[PROC-2_Webhook_worker]
 
@@ -895,7 +902,7 @@ At each run, PROC-2_Webhook_worker reads unprocessed entries from ENT-2_Stripe_M
 After successful processing, PROC-2_Webhook_worker marks the corresponding ENT-2_Stripe_Messages_Cache rows as processed so they are not handled again.”
 
 - [notes]:
-Runs on COMP-2_Webworker. Idempotency and no-double-charge behavior for UC-1_Cart_Checkout depend heavily on PROC-2_Webhook_worker correctly routing and de-duplicating Stripe events.
+Idempotency and no-double-charge behavior for UC-1_Cart_Checkout depend heavily on PROC-2_Webhook_worker correctly routing and de-duplicating Stripe events.
 
 - [open_items]:
 high: define retry/backoff policy when downstream PROC-10/PROC-11/PROC-12 fail while processing an event; low: decide whether ordering constraints between different event types (e.g. `payment_intent.*` vs `checkout.session.completed`) must be enforced; think about how to safely reprocess ENT-2_Stripe_Messages_Cache for backfills or bug fixes"
@@ -903,23 +910,29 @@ high: define retry/backoff policy when downstream PROC-10/PROC-11/PROC-12 fail w
 ````
 
 - Key rules:
-  - When other PROC-*, API-*, INT-* or UI-* appear, use explicit verbs such as “calls”, “invokes”, “is implemented by”, “is fed by”, “hands off to” instead of generic “the system does X”.
   - Each PROC-* **MUST** specify on what COMP-* is running (CRITICAL) and any API-* it interacts with.
-  - By finalization, each PROC-* should mention the INT-*, API-*, UI-* surfaces and entities it actually uses/runs/implements/interacts with.
+  - When an API-* is created it must always specify the PROC-* that handles it.
+  - **By finalization, each PROC-* should mention the INT-*, API-*, UI-* surfaces and entities it actually uses/runs/implements/interacts with (CRITICAL) using EXPLICIT wording that specifies what is the callee/caller relation with them.**
+  - For an INT-* implementing and calling are the same thing from the POV of a PROC-*
   - Do **not** create separate PROC-* items merely because there are alternative paths (success vs failure vs compensation) inside the same workflow; model those as flow branches within a single process unless the user clearly separates them.
-  - Depending on architecture, API-* may or may not sit between UI-* and PROC-* (eg: mobile or windows apps): when UI-* talks directly to a PROC-* (e.g. mobile/desktop apps), say so explicitly in the PROC-* `flow`/`notes`
+  - Depending on architecture a non secondary detail is that API-* are not always needed for the interaction between an UI-* and a PROC-* (eg: mobile or windows apps)
+  - When describing who calls a PROC-*:
+    - Only use “UI-* triggers PROC-* directly” when architecturally (eg: mobile apps, win apps) when there is no need of an API-* gated interaction. INT-* can't trigger PROC-* directly.
+    - When architecture is not clear **ASK THE USER FOR CLARIFICATIONS**
+
 """,
     "COMP":"""
 
-### COMP-* Components (~Emergent; runtime coordinate system, center of gravity B)
+### COMP-* Components
 
 - Essence:
-    - Concrete runtime artifacts we operate(services, workers, jobs, clients, adapters, datastores) that host processes, surfaces, integrations, and data.
+    - Concrete runtime artifacts we operate (services, workers, jobs, clients, datastores) that host processes, surfaces, integrations, and data.
+    - They have an extremely passive role: they only “serve”, “host”, “store”, “run” other items but do not participate in any UC-* or PROC-* flows.
     - COMP-* is the primary runtime coordinate system: conceptually treat its `notes` as the main place where we list which PROC-*, API-*, UI-*, ENT-* and INT-* “live” here.
-    - COMP-* have a passive role, they don't act upon things but only hosts, serves, there
+
 - Minimum content:
   - `definition`: what this runtime artifact is, its main responsibility, what classes of work it performs.
-  - `kind`: one of `service / worker / job / client / datastore / adapter`.
+  - `kind`: one of `service / worker / job / client / datastore`.
   - `notes`:
     * all the PROC-* and API-* running on this item, all the ENT-* it hosts, all the UI-* it serves.
     * any important runtime boundaries (e.g. “public-facing HTTP service”, “batch worker processing queue X”).
@@ -968,9 +981,11 @@ COMP-2_Database stores ENT-1_User_Cart and ENT-2_Stripe_Messages_Cache, which ar
 
 """,
     "ROLE" : """
-### ROLE-* (human actors; ~Emergent; Required when restricted actions/data exist)
+### ROLE-*
 
-- Essence: human roles/personas that interact with the system and have responsibilities or visibility boundaries.
+- Essence:
+  - human roles/personas that interact with the system and have responsibilities or visibility boundaries.
+  - It is Required when restricted actions/data exist
 
 - Minimum conceptual content:
   - `definition`: what this role is and what they are trying to achieve with the system.
@@ -998,27 +1013,27 @@ med: clarify if anonymous/guest users are supported or if a user account is alwa
 - Key rules:
   - Do not infer permissions or prohibitions; unknown permission boundaries stay as gaps.
   - If no ROLE-* exist yet, A1 may temporarily carry one gap: “Missing: primary human roles and one-line intent per role”.
-  - ROLE-* should mention the usecases is connected to and the UI-* it uses to interact with the system
+  - ROLE-* should mention the UC-* it is connected to and the UI-* it uses to interact with the system
 
 """,
     "UI":"""
 
 ### UI-* (surfaces; Optional → Required when UCs depend on UI)
 
-- Essence: human (or environment) interaction gateways (pages, consoles, screens, apps, kiosks, voice interfaces, etc.).
-
+- Essence:
+  - human (or environment) interaction gateways (pages, consoles, screens, apps, kiosks, voice interfaces, etc.).
+  - UI-* might use other UI-* items as sub-components or redirect to other UI-* surfaces.
 - Minimum conceptual content:
   - `definition`: purpose of the surface and which role(s) use it to achieve which goal.
   - `snippets`: any UI code/examples the user provides tied to this surface.
   - `notes`:
 
     * key user actions available here,
-    * how, depending on architecture, those actions map to system actions (API-*/PROC-*/INT-*) **DIRECTLY** and without mediation:
-        - UI-* Can interact directly with PROC-* depending on architecture (e.g. mobile/desktop apps) or they might need the mediation of an API-*
-        - UI-* Can act upon INT-* directly (make a call to an external service) or they can have that call mediated.
-        **WHAT COUNTS IS THAT THESE INTERACTIONS ARE NOT COMPRESSED/CRUNCHED and that UI-*clearly declares what its primary interaction lies , using verbs like “calls API-1_Checkout”, “triggers PROC-3_LocalFlow”, “initiates INT-2_Stripe_Payment_Events”.**
+    * how those actions map to system actions (API-*/PROC-*/INT-*), using explicit verbs like “calls API-1_Checkout”, “triggers PROC-3_LocalFlow”, “initiates INT-2_Stripe_Payment_Events”; keep the chain uncompressed so it is clear where the primary interaction lies.
     * main feedback states the user sees (success, errors, loading, critical state changes).
-    * What other information the UI-* exposes to the User
+    * what other information the UI-* exposes to the user.
+    * if they embed or redirect to other UI-* components.
+    **WARNING**: Direct calls to INT-* from a UI-* component are nowadays extremely rare; only model UI-* → INT-* when the user explicitly describes a call that is not mediated by an API-* or PROC-*.
 
 - Examples w output format:
 ````
@@ -1061,7 +1076,7 @@ med: clarify whether the cart panel also lets the user change quantities or remo
     - When a UI surface appears, you MUST mention:
       - An existing PROC-* and/or COMP-* serving/executing that surface (or a high-severity gap recorded) as soon as the surface is introduced.
       - At least one ROLE-* using this surface (or a high-severity gap recorded) as soon as the surface is introduced.
-      - The list API-*/INT-* it calls directly
+      - The list of API-* and/or INT-* it calls directly
       - The list of PROC-* that are triggered directly without an API-* mediation depending on architecture(eg: Mobile Apps, Desktop Apps)
   - Each UI flow must expose at least one explicit “system action” (trigger that can be actioned by the user) once known; if missing, record this as a UI gap instead of inventing a carrier.
   - UI items might contain multiple displayed items and actions: while the process of requirement gathering progresses they must all be collected
@@ -1079,6 +1094,7 @@ med: clarify whether the cart panel also lets the user change quantities or remo
 
     - identity fields (what uniquely identifies an instance),
     - key fields and states that drive behavior,
+    - key foreign keys pointing to other ENT-* items,
     - any invariants the user gives that must hold.
   - `notes`:
 
@@ -1131,8 +1147,10 @@ low: define whether historical carts are archived or deleted and how that affect
 ### INT-* (integrations/external systems; Optional → Required when external dependencies exist)
 
 - Essence: boundary contracts for integrations with external systems (often asynchronous, with explicit expectations on messages/behavior).
-    - It can be inbound (when the INT-* will call an API-* endpoint we expose) or outbound (when a PROC-* calls the INT-* surface exposed by an external system/vendor)
-    - We must create an INT-* for each surface we interface with (we call or we are called by)
+  It can be of 2 types depending on the `kind` attribute:
+    - `kind = outbound` when a PROC-* calls the external surface (`PROC-* calls INT-*`).
+    - `kind = inbound` when the external surface calls one of our API-* endpoints (`INT-* calls API-*`).
+  - We must create an INT-* for each distinct external surface we interface with (we call or we are called by).
 
 - Minimum conceptual content:
   - `definition`: which external system this is and what we use it for.
@@ -1142,6 +1160,7 @@ low: define whether historical carts are archived or deleted and how that affect
     - the kind of messages or operations involved (e.g. “payments”, “inventory sync”),
     - who initiates the interaction in plain language (“PROC-1_Redirect_To_Stripe_on_buy calls Stripe”, “Stripe calls API-3_Stripe_Webhook_Endpoint”),
     - any high-level constraints the user states about how we must talk to it (e.g. “must use their hosted checkout”).
+    - The PROC-* that implements it (outbound integration) or the API-* it calls (inbound integration like a webhook)
 
 - Example Output:
 ````
@@ -1179,8 +1198,9 @@ high: enumerate which Stripe event types must be handled and what each should do
   - There could be multiple INT-* for each vendor that must be differentiated depending on the UC-* that references them.
   - If an external system is system-of-record for a concept, mark that boundary and avoid inventing internal entities unless the user confirms local persistence.
   - Do not invent retry policies or SLAs; keep unknowns as gaps.
+  - For `kind = inbound`, INT-* MUST be described as “INT-* calls API-*”; a PROC-* can NEVER as the direct callee of INT-* in flows.
   - Ownership and placement rule:
-    - When an integration is first introduced, explicitly ask which PROC-* implements it (outbound) or API-* will be called by it depending on Kind; if unknown, introduce a minimal PROC-* or API-* placeholder and keep ownership as a high- severity gap.
+    - When an integration is first introduced, explicitly ask which PROC-* implements it (for `outbound`) or which API-* it calls (for `inbound`); if unknown, introduce a minimal PROC-* or API-* placeholder and keep ownership as a high-severity gap.
     - By finalization, each active INT-* MUST reference exactly one PROC-* or API-* that performs or handles the interaction.
 
 """,
@@ -1203,10 +1223,18 @@ high: enumerate which Stripe event types must be handled and what each should do
   - `notes`:
 
     - what the endpoint guarantees when it reports success/failure,
-    - any specific error behaviors that matter for callers’ flows.
-    - which PROC-* implements this API (“implemented by PROC-1_Redirect_To_Stripe_on_buy”) and which UI-*, PROC-* or INT-* typically call it, using explicit verbs (“called by UI-1_Cart_Panel”, “called by INT-2_Stripe_Payment_Events”)
+    - any specific error behaviors that matter for callers’ flows,
+    - which PROC-* is triggered by this API (CRITICAL) (e.g. “API-1_Checkout triggers PROC-1_Redirect_To_Stripe_on_buy.”),
+    - **DO NOT MENTION** which UI-*, PROC-* or INT-* calls it.
 
 Examples:
+````
+:::[API-1_Checkout]
+
+- [definition]:
+  Application endpoint that starts UC-1_Cart_Checkout for a given ENT-1_User_Cart and returns a redirect target toward INT-1_Stripe_Hosted_Form.
+
+- [contract]:
 ````
 :::[API-1_Checkout]
 
@@ -1220,12 +1248,12 @@ Authorization: user-session-or-JWT
 
 Request JSON:
 {
-    "cart_id": "UUID"
+  "cart_id": "UUID"
 }
 
 Response 200 JSON:
 {
-    "redirect_url": "https://checkout.stripe.com/..."
+  "redirect_url": "https://checkout.stripe.com/..."
 }
 
 Error responses:
@@ -1235,16 +1263,21 @@ Error responses:
 ```
 
 - [notes]:
-  API-1_Checkout accepts or infers an ENT-1_User_Cart, invokes PROC-1_Redirect_To_Stripe_on_buy, and responds with a redirect URL for Stripe. It does not itself decide payment success; it only initiates UC-1_Cart_Checkout.
+  API-1_Checkout accepts invokes PROC-1_Redirect_To_Stripe_on_buy, and responds with a redirect URL for Stripe. It does not itself decide payment success.
 
 - [open_items]:
-  med: define idempotency semantics for repeated `POST /checkout` calls on the same cart (retries, double-clicks, network timeouts); low: decide whether clients can pass additional context (e.g. locale, return URLs) or if those are always inferred server-side; low: decide the exact error response payload shape (machine-readable error codes vs plain error messages)
+  med: decide whether clients can pass additional context (e.g. locale, return URLs) or if those are always inferred server-side; low: decide the exact error response payload shape (machine-readable error codes vs plain error messages)
 
 ````
-
 - Key rules:
-   - When an API endpoint is first introduced, explicitly ask the PROC-* that implements it; if none exists yet, PROC-* placeholder and record the ownership as a gap.
-   - By finalization, each active API-* MUST mention to at least one PROC-* or UI-* that actually consumes it, or an External system INT-* inbound integration that uses it as integration point.
+   - By convention, any business logic or system action (eg: save data in a ENT-*) lives in PROC-*.
+      - API- is a boundary: it validates/unpacks the request BUT THEN IT MUST ALWAYS TRIGGER EXACTLY ONE PROC-* that actually performs the work.
+      - any persistence or data access must be described only inside the triggered PROC-* (which in turn uses ENT-*/COMP-*).
+      - When an API endpoint is first introduced, it is CRITICAL to create the PROC-* placeholder that is triggered by it if none already exists yet, and assign any action that should be performed by the API-* to it. The triggered PROC-* Must be explicitely mentioned as such in the API-* notes.
+      - If is not clear what kind of processing the handling PROC-* should do, you must create a `high` level open_item for it.
+      - If possible define the PROC-* where the API is implemented as well; if none exists yet record the fact as a med gap in `open_items`.
+   - By finalization, each active API-* MUST mention to at least one PROC-* or UI-* that actually consumes it, or an External system that uses it as inbound integration point passing trough an INT-* integration point.
+
 """,
 
     "NFR":"""
@@ -1278,7 +1311,7 @@ med: decide how violations of NFR-1_Payments_Consistency are detected and surfac
 """,
     "UC":"""
 
-### UC-* Use Cases (~Emergent; center of gravity A)
+### UC-* Use Cases
 
 - Essence: each use case is a **scenario** (cluster of transitions) from trigger to success. It is normally composed by multiple PROC-* + Multiple ROLE-* Actions + Multiple INT-*
 - Minimum conceptual content for each UC:
@@ -1286,8 +1319,15 @@ med: decide how violations of NFR-1_Payments_Consistency are detected and surfac
     - the initiating intent (why the primary actor starts this scenario), and
     - the end condition that they would consider a successful outcome.
   - `flow`: A detailed main flow from initial triggers → outcome, with:
-    - the chain of Initiator → Signal → Receiver → Reaction → Change is composed of, using explicit item labels (ROLE-*, UI-*, API-*, PROC-*, INT-*, ENT-*),
+    - the chain of Initiator → Signal → Receiver → Reaction → Change is composed of, with no limitations of direct/indirect items intercations.
     - key alternative/exception paths
+    - while limiting other families descriptions only to direct interactions *keep free form descriptions with complex sync/asyncronous item interactions for UC-***
+      This includes:
+      - what children items calls/consumes/redirects to/triggers using explicit verbs such as “call”, “invoke”, “trigger" instead of generic phrases like “the system handles X” or graph jargon like “depends on”, “parent”, “child”.
+      - extended narrations of complex interaction between components. Examples:
+        - Multi step narration without compressing the role of each item: `UI-1_click_me calls API-1_click_listener by clicking a button. API-1_click_listener triggers PROC-1_onclick_action`
+        - Complex durable handoff narrations where if PROC-1 writes/persists/publishes data that PROC-2 later polls/reads/consumes from tables, queues, topics, streams, logs, or similar persist-then-poll, durable handoff interactions
+
   - `notes`: Pre/postconditions only if they materially matter.
 
 - Example Output:
@@ -1319,26 +1359,34 @@ low: Decide if we need a separate UC for “retry payment from failed checkout�
   - you **must** create or update a UC-* conceptual stub for that scenario in the same turn, even if A1 is still incomplete.
   - **Do not crush the chain of clustered (Initiator → Signal → Receiver → Reaction → Change) into pass-partout definition (eg: "when the user clicks the `system` does..") because recognizing the actors of each flow is our primary task.
   - When the user clearly names a scenario (“Checkout flow”, “Admin refunds order”), use that name as the UC label suffix; if they do not, you may ask them to name it once the scenario is stable. The UC name is part of the evidence about how they conceptualize this outcome and must stay aligned with their vocabulary.
-  - A single user message may yield multiple UC-* items when it clearly describes multiple different “why → outcome” chains; do not artificially merge distinct intents into one UC.
+  - UC-* is the place where complex narrative lives; keep cross-component storytelling here that has not spread into children PROC-*, COMP-*, or API-*.
 
 """,
     "A":"""
-### A-* Use Cases (~Emergent; )
+### A-* Use Cases
 
-- **A1_PROJECT_CANVAS (~Emergent; ask first)**
-  - Essence: what is being built (eg: “What do you want to build today?”)
+- **A1_PROJECT_CANVAS
+  - Essence:
+    - The system-level narrative that explains what is being built and how the various use cases hang together as a single flow and the system comes together as a whole.
+    - It answers:
+      - What are we building?
+      - What are the major phases of interaction?
+      - Which UC-* belong to each phase and how do they feed into each other?
+
   - Key rules:
-    - It takes just a broad starter with only a domain label to qualify the canvas (e.g. “an e-commerce”, “a CRM”, “a videogame”);
-    - Keep this statement updated whenever new elements will emerge.
+    - Base yourself on the SOURCE_TEXT to describe how the different UC integrates together in a single flow/narrative.
+    - Do NOT re-specify detailed UC descriptions as they will be read together with this text.
+    - Do NOT invent major capabilities/workflows that are not implied;
+    - Focus on the global narrative expressed by SOURCE_TEXT and how the different UC-* glue together to support that narrative.
+    - Make sure to mention all the UC-* items that were provided. Mention other items included in each UC-* definition sparsely.
 
-- **A2_TECHNOLOGICAL_INTEGRATIONS (~Emergent; early anchor)**
+- **A2_TECHNOLOGICAL_INTEGRATIONS
   - Essence: must-use integrations/platforms/tech/libraries/frameworks and build-vs-integrate boundaries.
   - Key rules:
     - Names of required third-party systems, SDKs, platforms, frameworks or internal platforms we consume/integrate/architect with.
     - At start we should at least collect a coarse definition regarding "what we use it for, what it gives us back and integration method" but expect the user to need support and suggestions on how to implement each integration.
 
-
-- **A3_TECHNICAL_CONSTRAINTS (~Emergent → Required if they shape architecture)**
+- **A3_TECHNICAL_CONSTRAINTS
   - Essence: non-integration constraints (hosting/runtime/network, residency, security/compliance, performance/availability).
   - Key rules:
     - Capture constraints opportunistically when they appear in scenarios, keep it low priority.
@@ -1346,7 +1394,6 @@ low: Decide if we need a separate UC for “retry payment from failed checkout�
     - Hosting / runtime conditions (on-prem vs cloud, regions, devices, “must work offline”, etc.).
     - Compliance / residency / security regimes that materially affect design.
     - Performance / availability classes when they constrain how we build (e.g. “low latency chat”, “batch is fine”).
-
 
 - **A4_ACCEPTANCE_CRITERIA (~Emergent; can be waived)**
   - Essence: system-level acceptance outcomes and must-not guardrails.
@@ -1360,10 +1407,15 @@ Example:
 ```
 :::[A1_PROJECT_CANVAS]
 - [notes]:
-We are building a small web-based e-commerce.
+We are building a large-scale, web-based e-commerce platform where customers can discover products from many sellers, compare options, place orders, and track deliveries, while internal actors manage catalog, inventory, pricing, and fulfilment.
+
+A customer typically arrives on the storefront and may either continue as a guest or go through identity setup (UC-1_Sign_Up_And_Login) to unlock stored addresses, payment methods and preferences. As they build up their profile over time (UC-2_Manage_Account_And_Addresses, UC-3_Manage_Payment_Methods, UC-4_Consent_And_Preferences), the system accumulates the identity, address and payment context that later checkout and fulfilment steps will reuse.
+From there, the normal loop is discovery and evaluation: the customer browses and searches the catalog (UC-5_Browse_And_Search_Catalog), refines results with filters and sorting (UC-6_Filter_And_Sort_Results), inspects individual product pages (UC-7_View_Product_Details), and uses recommendations and “related items” (UC-8_View_Recommendations_And_Related_Items) plus seller/review information (UC-9_View_Seller_And_Review_Information) to decide what to buy. As they find suitable items, they add and adjust them in their cart (UC-10_Manage_Cart) while the backend keeps catalog, pricing and availability consistent across views.
+Once ready to purchase, the customer proceeds to checkout (UC-11_Checkout_Select_Address_And_Delivery_Options), where stored or newly entered addresses and delivery options are selected and validated against current availability. The platform then orchestrates payment (UC-12_Payment_Authorization_And_Order_Creation): it authorizes the chosen payment method, creates an order with committed line items, charges and expected delivery windows, and returns a confirmation or targeted recovery options if something fails (e.g. retry payment, change address or adjust cart).
+After an order exists, the relationship moves into post-purchase service: the customer monitors shipments and order state via tracking views (UC-13_View_Orders_And_Tracking), and, when needed, initiates cancellations, returns and refunds (UC-14_Returns_Cancellations_And_Refunds). Throughout the order lifecycle they can communicate with support or sellers (UC-15_Messages_And_Support) to resolve issues, and once items are delivered, they provide reviews and ratings (UC-16_Review_And_Rating_Submission). Those post-purchase signals feed back into discovery (UC-5–UC-9), influencing future search ranking, recommendations and trust cues for other customers, while the same customer can re-enter the discovery → cart → checkout → post-purchase loop many times over their lifetime.
 
 - [open_items]:
-med: clarify which e-commerce capabilities are in scope beyond checkout (catalog, inventory, shipping, refunds, subscriptions, taxes, discounts);"
+high: define the authoritative inventory and promise model (per-warehouse stock, backorder rules, reservation timing) so discovery, cart and checkout share consistent availability guarantees; med: decide the scope of personalization/recommendations (purely on-session vs long-term profile-based) and how strongly they influence search/browse results;
 
 :::[A2_TECHNOLOGICAL_INTEGRATIONS]
 - [notes]:
@@ -1414,7 +1466,7 @@ Given:
   (2) EXTRACTED_UCS: the current UC ledger produced by UC_EXTRACTOR (BSS-labeled)
 Return ONLY:
   - Completion: <integer 0..100>%
-  - Missing use cases: a deduplicated list of lightweight UC stubs for scenario clusters in SOURCE_TEXT not represented by any extracted UC
+  - Missing use cases: a limited deduplicated list of lightweight UC stubs for scenario clusters in SOURCE_TEXT not represented by any extracted UC
 
 ============================================================
 CORE MINDSET — UCs ARE CLUSTERS OF TRANSACTIONS 🧩
@@ -1535,6 +1587,8 @@ Dedup rules:
 ============================================================
 OUTPUT FORMAT (STRICT: OUTPUT ONLY THIS) 📤
 ============================================================
+(CRITICAL): Limit yourself to a max {max_ingested_uc} of returned UC definitions
+
 ```
 - Completion: <N>%
 - Missing use cases:

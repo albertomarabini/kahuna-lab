@@ -210,7 +210,6 @@ class LlmClient(BaseLlmClient):
                 project=vertex_project,
                 location=vertex_region,
                 model_name=model_name,
-                timeout=timeout,
             )
             self._client = None
         elif self.provider == "openai":
@@ -229,7 +228,7 @@ class LlmClient(BaseLlmClient):
         Single HTTP call without retries/backoff.
         """
         if self.provider == "vertex":
-            resp = self._vertex.invoke(prompt)
+            resp = self._vertex.invoke(prompt, timeout=self._timeout)
 
             # Try to pull usage_metadata from the response if available
             usage_md = getattr(resp, "usage_metadata", None)
@@ -298,7 +297,6 @@ class ChatLlmClient(BaseLlmClient):
                 project=vertex_project,
                 location=vertex_region,
                 model_name=model_name,
-                timeout=timeout,
             )
             self._client = None
         elif self.provider == "openai":
@@ -331,7 +329,7 @@ class ChatLlmClient(BaseLlmClient):
         Single HTTP call without retries/backoff.
         """
         if self.provider == "vertex":
-            resp = self._vertex.invoke(messages)
+            resp = self._vertex.invoke(messages, timeout=self._timeout)
 
             # Try to pull usage_metadata from the response if available
             usage_md = getattr(resp, "usage_metadata", None)

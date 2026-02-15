@@ -1,14 +1,14 @@
 import os
 import json
 from datetime import timedelta
-from typing import Callable
+from typing import Callable, Optional
 
 from google.cloud import storage, secretmanager
 from google.oauth2 import service_account
 from google.auth import default as google_auth_default
 
 import pg8000
-from sqlalchemy import create_engine, text
+from sqlalchemy import NullPool, create_engine, text
 from sqlalchemy.orm import sessionmaker, Session
 
 
@@ -86,7 +86,16 @@ class GCConnection:
     # -------- SQLAlchemy Session factory --------
     def build_db_session_factory(self) -> Callable[[], Session]:
         if not getattr(self, "_sessionmaker", None):
-            engine = create_engine(self.DATABASE_URL, future=True, pool_pre_ping=True)
+            # engine = create_engine(
+            #     self.DATABASE_URL,
+            #     future=True,
+            #     pool_pre_ping=True,
+            #     pool_size=10,      # <= keep up to 10 connections in the pool
+            #     max_overflow=0,    # <= do NOT allow extra "overflow" connections
+            #     pool_timeout=30,   # optional: how long to wait for a conn before error
+            #     pool_recycle=1800, # optional: recycle conns every 30 min to avoid stale
+            # )
+            engine = create_engine(self.DATABASE_URL, future=True, pool_pre_ping=True, poolclass = NullPool)
             self._sessionmaker = sessionmaker(
                 bind=engine,
                 autoflush=False,
@@ -129,3 +138,20 @@ class GCConnection:
             import logging
             logging.getLogger("worker").warning("Could not generate signed URL (non-fatal): %s", e)
             return None
+
+
+
+_session_factory: Optional[Callable[[], Session]] = None
+
+
+def get_session_factory() -> Callable[[], Session]:
+    """
+    Lazy, per-process singleton.
+    Creates one GCConnection + one Engine + one SessionFactory,
+    and returns the same factory on every call.
+    """
+    global _session_factory
+    if _session_factory is None:
+        conn = GCConnection()
+        _session_factory = conn.build_db_session_factory()
+    return _session_factory
